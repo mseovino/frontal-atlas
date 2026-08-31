@@ -132,20 +132,6 @@ def _polylines(group: object) -> list[tuple[list[float], list[float], str | None
         out.append((list(lats), list(lons), group.get("strength")))
     return out
 
-def center_frequency_grid(centers: pd.DataFrame, grid: Grid | None = None) -> np.ndarray:
-    """Count how many analyses placed a center (H or L) in each cell."""
-    grid = grid or Grid()
-    counts = np.zeros(grid.shape, dtype=np.int64)
-    if centers.empty:
-        return counts
-    row, col = grid.to_cells(centers.lon.to_numpy(), centers.lat.to_numpy())
-    keep = row >= 0
-    if not keep.any():
-        return counts
-    flat = row[keep] * grid.nx + col[keep]
-    np.add.at(counts.reshape(-1), flat, 1)
-    return counts
-
 def _normalize_lon(lon: float, report: LoadReport | None = None) -> float:
     """Return longitude as signed degrees east in [-180, 180].
 
@@ -166,6 +152,46 @@ def _normalize_lon(lon: float, report: LoadReport | None = None) -> float:
             report.lon_flipped += 1
         return -lon
     return lon
+
+
+# Plausibility bounds on central pressure. The archive contains label and
+# transcription errors -- 1,115 "lows" above 1030 hPa, 800 "highs" below 1000,
+# and a handful beyond any pressure ever observed on Earth (one low at 1188
+# hPa). About 0.11% of centers. The same bad values appear in both the LR and
+# HR copies of an analysis, so these are errors in the source analysis rather
+# than in the encoding, and no amount of parsing care removes them.
+#
+# They are kept at ingest and filtered here, at analysis time: dropping them
+# on the way in would hide from a future reader that they exist.
+PRESSURE_LIMITS = {
+    # (min, max) hPa. World records are about 870 and 1084; the per-kind
+    # bounds are looser than climatology on the plausible side and hard on
+    # the side where the label and the value contradict each other.
+    "L": (880.0, 1030.0),
+    "H": (1000.0, 1085.0),
+}
+
+
+def implausible_pressure(centers: pd.DataFrame) -> pd.Series:
+    """Boolean mask of centers whose pressure contradicts their label.
+
+    A null pressure is not implausible -- it is merely absent -- so it is
+    left False and callers can decide separately whether they need one.
+    """
+    mask = pd.Series(False, index=centers.index)
+    for kind, (lo, hi) in PRESSURE_LIMITS.items():
+        is_kind = centers.kind == kind
+        bad = is_kind & (
+            (centers.pressure_hpa < lo) | (centers.pressure_hpa > hi)
+        )
+        mask |= bad.fillna(False)
+    return mask
+
+
+def drop_implausible_pressure(centers: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Return (kept centers, number dropped)."""
+    bad = implausible_pressure(centers)
+    return centers[~bad], int(bad.sum())
 
 
 def _in_range(lat: float, lon: float) -> bool:

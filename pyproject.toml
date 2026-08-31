@@ -10,6 +10,8 @@ dependencies = [
     "pyproj>=3.6",
     "matplotlib>=3.8",
     "duckdb>=1.0",
+    # linear_sum_assignment for center tracking, gaussian_filter for smoothing
+    "scipy>=1.11",
 ]
 
 [project.optional-dependencies]

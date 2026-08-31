@@ -55,6 +55,20 @@ python scripts/build.py density data/parquet --ftype COLD --month 3 --out mar_co
 python scripts/build.py plot mar_cold.npz --out mar_cold.png
 ```
 
+Pressure centers have their own three commands, all of which take
+`--kind H|L`, `--res`, and `--season`:
+
+```bash
+python scripts/build.py centers   data/parquet --kind L --res HR --season DJF --out lows_djf.npz
+python scripts/build.py intensity data/parquet --kind L --res HR --season DJF --out lows_djf_p.npz
+python scripts/build.py track     data/parquet --kind L --res HR --out data/tracks
+```
+
+`centers` counts centers per cell, `intensity` averages central pressure, and
+`track` links centers across analyses into tracks (Hungarian assignment on
+distance plus a pressure-jump penalty, under a speed cap). Tracking the full
+HR low record takes about 18 seconds and yields ~90,600 tracks.
+
 `density` takes `--month N` or `--season DJF|MAM|JJA|SON`. `basemap` fetches
 3.3 MB of Natural Earth 1:50m line layers (coastline, national borders,
 states and provinces) into `data/ne/`. It is a separate command on purpose:
@@ -138,6 +152,28 @@ archive carry latitudes between 91 and 98 degrees, all in LR bulletins from
 source. They project to infinity. The loader drops them at the door and counts
 them in `LoadReport.out_of_range`; `ord` keeps the original vertex index so
 the gap in a line is visible rather than renumbered away.
+
+**A long track is not necessarily a cyclone.** Nearest-neighbour linking
+assumes a center is a travelling system, and for quasi-stationary features
+that assumption fails completely. The longest low track in the HR record runs
+**45 days and displaces 14 km**: it is the Mojave thermal low, re-analysed in
+the same place every three hours all summer. It is a real track of a real
+analysed feature and it is not a cyclone. Of the 12,768 low tracks lasting a
+day or more, **36% displace under 500 km**. `track_stats` therefore reports
+`net_km`, `path_km` and `mean_speed_kmh`, and `track` prints the stationary
+fraction — filter on motion before computing anything about lifetimes,
+deepening rates, or genesis density.
+
+**Central pressure needs a plausibility filter.** The archive holds 1,115
+"lows" above 1030 hPa, 800 "highs" below 1000, and a handful beyond anything
+ever observed on Earth, including a low at 1188 hPa — about 0.11% of centers.
+The same bad values appear in both the LR and HR copies of an analysis, so
+these are errors in the source analysis, not the encoding. They are kept at
+ingest and dropped at analysis time by `load.drop_implausible_pressure`, so a
+reader can still see that they exist. The low floor is 880 hPa to admit
+tropical cyclones, which means it also admits a few bad extratropical values —
+an 883 hPa "low" over interior Alaska survives the filter and is certainly
+wrong.
 
 **Never mix LR and HR.** The same analysis appears in the archive at both
 resolutions, and they carry distinct `bulletin_id`s so they cannot silently

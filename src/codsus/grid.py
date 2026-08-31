@@ -230,3 +230,41 @@ def point_grid(centers: pd.DataFrame, grid: Grid | None = None) -> np.ndarray:
 
     flat = row[keep] * grid.nx + col[keep]
     return np.bincount(flat, minlength=grid.ny * grid.nx).reshape(grid.shape)
+
+def intensity_grid(
+    centers: pd.DataFrame,
+    grid: "Grid | None" = None,
+    min_count: int = 5,
+) -> np.ndarray:
+    """Mean central pressure (hPa) per cell, NaN where too few samples to trust.
+
+    Unlike point_grid (a count), this averages pressure_hpa within each cell.
+    A genuinely different statistic from frequency: this answers "how strong
+    is a system here", not "how often does one pass through."
+    """
+    grid = grid or Grid()
+    if centers.empty:
+        return np.full(grid.shape, np.nan)
+
+    df = centers.dropna(subset=["pressure_hpa"])
+    if df.empty:
+        return np.full(grid.shape, np.nan)
+
+    row, col = grid.to_cells(df.lon.to_numpy(), df.lat.to_numpy())
+    keep = row >= 0
+    if not keep.any():
+        return np.full(grid.shape, np.nan)
+
+    flat = row[keep] * grid.nx + col[keep]
+    pressures = df.pressure_hpa.to_numpy()[keep]
+
+    # bincount rather than np.add.at, which falls back to an unbuffered
+    # element-by-element loop and is an order of magnitude slower.
+    size = grid.ny * grid.nx
+    sums = np.bincount(flat, weights=pressures, minlength=size)
+    counts = np.bincount(flat, minlength=size)
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = sums / counts
+    mean[counts < min_count] = np.nan
+    return mean.reshape(grid.shape)

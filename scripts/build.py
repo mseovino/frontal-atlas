@@ -65,29 +65,144 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
     print(f"wrote {args.dest}/centers and {args.dest}/points")
 
+def _load_centers(args: argparse.Namespace) -> pd.DataFrame:
+    """Read the centers table for one kind, resolution and season.
+
+    Filtering on `res` is not optional. LR and HR carry the same analysis at
+    two resolutions, so without it every analysis is counted twice and at two
+    slightly different positions, which both doubles the denominator and
+    smears the field.
+    """
+    centers = (
+        ds.dataset(Path(args.source) / "centers", format="parquet", partitioning="hive")
+        .to_table(
+            columns=["bulletin_id", "valid_time", "kind", "lat", "lon", "pressure_hpa"],
+            filter=(ds.field("res") == args.res) & (ds.field("kind") == args.kind),
+        )
+        .to_pandas()
+    )
+    if args.season:
+        centers = centers[centers.valid_time.dt.month.isin(SEASONS[args.season])]
+
+    centers, dropped = ld.drop_implausible_pressure(centers)
+    if dropped:
+        print(f"  dropped {dropped} centers whose pressure contradicts their label")
+    return centers
+
+
 def cmd_centers(args: argparse.Namespace) -> None:
-    centers = pd.read_parquet(Path(args.source) / "centers")
-    centers = centers[centers.kind == args.kind]
-
-    season_months = {"winter": [12, 1, 2], "summer": [6, 7, 8]}
-    if args.season != "all":
-        centers = centers[centers.valid_time.dt.month.isin(season_months[args.season])]
-
-    n_bulletins = centers.bulletin_id.nunique()
-    if n_bulletins == 0:
+    centers = _load_centers(args)
+    n_analyses = centers.bulletin_id.nunique()
+    if n_analyses == 0:
         sys.exit("no bulletins match that selection")
 
     grid = g.Grid(cell_km=args.cell_km)
-    counts = g.center_frequency_grid(centers, grid)
-    freq = counts / n_bulletins
+    raw = g.point_grid(centers, grid)
+
+    # Mask on the raw counts, before smoothing: after a Gaussian pass every
+    # cell near an occupied one holds a fractional count, so thresholding the
+    # smoothed field would be testing the support of the kernel rather than
+    # how much data actually stands behind each cell.
+    counts = raw.astype(float)
+    if args.smooth_km > 0:
+        from scipy.ndimage import gaussian_filter
+
+        counts = gaussian_filter(counts, sigma=args.smooth_km / args.cell_km)
+
+    freq = counts / n_analyses
+    freq[raw < args.min_count] = np.nan
+
     np.savez_compressed(
         args.out,
-        freq=freq, counts=counts, n_bulletins=n_bulletins,
+        freq=freq,
+        counts=raw,
+        n_analyses=n_analyses,
+        n_bulletins=n_analyses,
         cell_km=grid.cell_km,
         extent=[grid.x_min, grid.x_max, grid.y_min, grid.y_max],
         crs=grid.crs.to_proj4(),
+        label=_centers_label(args),
+        unit="centers per analysis",
     )
-    print(f"{n_bulletins} bulletins -> {args.out} (peak {freq.max():.3f} per analysis)")
+    print(
+        f"{n_analyses} analyses -> {args.out} "
+        f"(peak {np.nanmax(freq):.3f} per analysis)"
+    )
+
+def cmd_track(args: argparse.Namespace) -> None:
+    from codsus import track as tk
+
+    centers = (
+        ds.dataset(Path(args.source) / "centers", format="parquet", partitioning="hive")
+        .to_table(
+            columns=["bulletin_id", "valid_time", "res", "kind",
+                     "lat", "lon", "pressure_hpa"],
+            filter=(ds.field("res") == args.res) & (ds.field("kind") == args.kind),
+        )
+        .to_pandas()
+    )
+    # A center whose pressure contradicts its label would either break a track
+    # in two on the pressure-jump cap or drag the cost of a wrong match down.
+    centers, dropped = ld.drop_implausible_pressure(centers)
+    if dropped:
+        print(f"  dropped {dropped} centers whose pressure contradicts their label")
+
+    params = tk.TrackParams(max_gap_hours=args.max_gap_hours)
+    tracks = tk.build_tracks(centers, kind=args.kind, res=args.res, params=params)
+    stats = tk.track_stats(tracks)
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    tracks.to_parquet(out / "tracks.parquet")
+    stats.to_parquet(out / "track_stats.parquet")
+
+    print(f"{len(stats)} tracks from {len(tracks)} centers "
+          f"({args.kind}, {args.res})")
+    if not stats.empty:
+        longest = stats.loc[stats.n_steps.idxmax()]
+        deepest = stats.loc[stats.min_pressure_hpa.idxmin()]
+        print(f"  longest track: {longest.n_steps} steps over "
+              f"{longest.duration_hours / 24:.1f} days, "
+              f"net displacement {longest.net_km:.0f} km")
+        print(f"  deepest track: {deepest.min_pressure_hpa:.0f} hPa, "
+              f"genesis {deepest.genesis_time}")
+
+        # Quasi-stationary features link into very long tracks that are not
+        # cyclones. Reported here so the number is seen before anyone
+        # computes a lifetime statistic over the whole set.
+        durable = stats[stats.n_steps >= 8]  # a day or more at 3-hourly
+        stationary = durable[durable.net_km < 500.0]
+        if len(durable):
+            print(f"  {len(durable)} tracks last a day or more; "
+                  f"{len(stationary)} of those displace under 500 km "
+                  f"({100 * len(stationary) / len(durable):.0f}%) and are "
+                  f"likely quasi-stationary, not travelling systems")
+
+def cmd_intensity(args: argparse.Namespace) -> None:
+    centers = _load_centers(args)
+    n_analyses = centers.bulletin_id.nunique()
+    if n_analyses == 0:
+        sys.exit("no bulletins match that selection")
+
+    grid = g.Grid(cell_km=args.cell_km)
+    mean_hpa = g.intensity_grid(centers, grid, min_count=args.min_count)
+    np.savez_compressed(
+        args.out,
+        mean_hpa=mean_hpa,
+        n_analyses=n_analyses,
+        n_bulletins=n_analyses,
+        cell_km=grid.cell_km,
+        extent=[grid.x_min, grid.x_max, grid.y_min, grid.y_max],
+        crs=grid.crs.to_proj4(),
+        label=_centers_label(args, "mean pressure"),
+    )
+    valid = mean_hpa[~np.isnan(mean_hpa)]
+    if valid.size == 0:
+        sys.exit(f"every cell fell below --min-count {args.min_count}")
+    print(
+        f"{n_analyses} analyses -> {args.out} "
+        f"(range {valid.min():.0f}-{valid.max():.0f} hPa)"
+    )
 
 def cmd_basemap(args: argparse.Namespace) -> None:
     """Fetch Natural Earth line layers for plotting.
@@ -237,6 +352,15 @@ MONTHS = [
 ]
 
 
+def _centers_label(args: argparse.Namespace, what: str = "density") -> str:
+    """Describe a centers or intensity field so the plot can title itself."""
+    kind = "Lows" if args.kind == "L" else "Highs"
+    bits = [f"{kind} {what}", args.res]
+    if args.season:
+        bits.append(args.season)
+    return ", ".join(bits)
+
+
 def _selection_label(args: argparse.Namespace) -> str:
     """Human-readable description of what a density field actually contains."""
     bits = [f"{args.ftype or 'all'} fronts", args.res]
@@ -265,18 +389,46 @@ def cmd_plot(args: argparse.Namespace) -> None:
     import matplotlib.pyplot as plt
 
     z = np.load(args.source)
-    freq = z["freq"]
+    is_intensity = "mean_hpa" in z
+    field = z["mean_hpa"] if is_intensity else z["freq"]
     x_min, x_max, y_min, y_max = z["extent"]
     label = str(z["label"]) if "label" in z else Path(args.source).stem
     n = int(z["n_analyses"]) if "n_analyses" in z else int(z["n_bulletins"])
+    unit = str(z["unit"]) if "unit" in z else "crossings per analysis"
+
+    if is_intensity:
+        # Pressure is not a density: it has no meaningful zero, empty cells
+        # are already NaN, and the scale should follow the data rather than
+        # start at the origin.
+        display, vmin, vmax = field, None, None
+        cbar_label = "mean central pressure (hPa)"
+    else:
+        # Density fields are heavy-tailed -- a handful of cells sit far above
+        # the rest and, left alone, compress everything else into one flat
+        # colour. Clipping at a high percentile of the occupied cells shows
+        # the pattern, and the peak goes in the title so nothing is hidden.
+        display = np.where(field > 0, field, np.nan)
+        occupied = field[field > 0]
+        vmin = 0.0
+        vmax = (
+            float(np.percentile(occupied, args.vmax_pct))
+            if occupied.size
+            else None
+        )
+        cbar_label = unit
 
     fig, ax = plt.subplots(figsize=(11, 8.5), dpi=args.dpi)
+    cmap = args.cmap
+    if is_intensity and args.cmap == "magma_r":
+        cmap = "RdBu_r"  # neutral diverging default for pressure, not density
     mesh = ax.imshow(
-        np.where(freq > 0, freq, np.nan),
+        display,
         origin="lower",
         extent=(x_min, x_max, y_min, y_max),
-        cmap=args.cmap,
+        cmap=cmap,
         interpolation="nearest",
+        vmin=vmin,
+        vmax=vmax,
     )
 
     # Graticule: project constant-lat and constant-lon lines into grid metres.
@@ -347,8 +499,14 @@ def cmd_plot(args: argparse.Namespace) -> None:
     ax.set_ylim(y_min, y_max)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_title(f"{label}\n{n:,} analyses, {grid.cell_km:g} km equal-area cells")
-    fig.colorbar(mesh, ax=ax, shrink=0.7, label="crossings per analysis")
+    subtitle = f"{n:,} analyses, {grid.cell_km:g} km equal-area cells"
+    if not is_intensity:
+        subtitle += f", peak {np.nanmax(field):.3f}"
+    ax.set_title(f"{label}\n{subtitle}")
+    fig.colorbar(
+        mesh, ax=ax, shrink=0.7, label=cbar_label,
+        extend="max" if vmax is not None else "neither",
+    )
     fig.savefig(args.out, bbox_inches="tight")
     print(f"wrote {args.out}")
 
@@ -379,10 +537,34 @@ def main() -> None:
     p = sub.add_parser("centers", help="build a high/low pressure center frequency grid")
     p.add_argument("source", help="Parquet directory from ingest")
     p.add_argument("--kind", required=True, choices=["H", "L"])
-    p.add_argument("--season", default="all", choices=["all", "winter", "summer"])
-    p.add_argument("--cell-km", type=float, default=50.0)
+    p.add_argument("--res", default="HR", choices=["HR", "LR"])
+    p.add_argument("--season", choices=list(SEASONS), help="DJF, MAM, JJA or SON")
+    p.add_argument("--cell-km", type=float, default=150.0)
     p.add_argument("--out", default="centers.npz")
-    p.set_defaults(func=cmd_centers)    
+    p.add_argument("--smooth-km", type=float, default=0.0)
+    p.add_argument("--min-count", type=int, default=5)
+    p.set_defaults(func=cmd_centers)
+
+    p = sub.add_parser("intensity", help="mean central pressure grid")
+    p.add_argument("source", help="Parquet directory from ingest")
+    p.add_argument("--kind", required=True, choices=["H", "L"])
+    p.add_argument("--res", default="HR", choices=["HR", "LR"])
+    p.add_argument("--season", choices=list(SEASONS), help="DJF, MAM, JJA or SON")
+    p.add_argument("--cell-km", type=float, default=250.0)
+    p.add_argument("--min-count", type=int, default=5)
+    p.add_argument("--out", default="intensity.npz")
+    p.set_defaults(func=cmd_intensity)
+
+    p = sub.add_parser("track", help="link pressure centers into tracks over time")
+    p.add_argument("source", help="Parquet directory from ingest")
+    p.add_argument("--kind", required=True, choices=["H", "L"])
+    p.add_argument("--res", default="HR", choices=["HR", "LR"])
+    p.add_argument(
+        "--max-gap-hours", type=float, default=6.0,
+        help="never link centers across a longer gap than this",
+    )
+    p.add_argument("--out", default="data/tracks")
+    p.set_defaults(func=cmd_track)
 
     p = sub.add_parser("basemap", help="fetch Natural Earth outlines for plotting")
     p.add_argument("--dest", default="data/ne")
@@ -394,6 +576,10 @@ def main() -> None:
     p.add_argument("--out", default="density.png")
     p.add_argument("--cmap", default="magma_r")
     p.add_argument("--dpi", type=int, default=140)
+    p.add_argument(
+        "--vmax-pct", type=float, default=99.0,
+        help="clip the colour scale at this percentile of occupied cells",
+    )
     p.add_argument("--anchors", action="store_true", help="draw city reference points")
     p.add_argument("--ne-dir", default="data/ne", help="Natural Earth GeoJSON directory")
     p.add_argument("--no-basemap", action="store_true", help="omit coastlines and borders")
