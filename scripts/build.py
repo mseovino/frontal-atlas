@@ -65,6 +65,29 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
     print(f"wrote {args.dest}/centers and {args.dest}/points")
 
+def cmd_centers(args: argparse.Namespace) -> None:
+    centers = pd.read_parquet(Path(args.source) / "centers")
+    centers = centers[centers.kind == args.kind]
+
+    season_months = {"winter": [12, 1, 2], "summer": [6, 7, 8]}
+    if args.season != "all":
+        centers = centers[centers.valid_time.dt.month.isin(season_months[args.season])]
+
+    n_bulletins = centers.bulletin_id.nunique()
+    if n_bulletins == 0:
+        sys.exit("no bulletins match that selection")
+
+    grid = g.Grid(cell_km=args.cell_km)
+    counts = g.center_frequency_grid(centers, grid)
+    freq = counts / n_bulletins
+    np.savez_compressed(
+        args.out,
+        freq=freq, counts=counts, n_bulletins=n_bulletins,
+        cell_km=grid.cell_km,
+        extent=[grid.x_min, grid.x_max, grid.y_min, grid.y_max],
+        crs=grid.crs.to_proj4(),
+    )
+    print(f"{n_bulletins} bulletins -> {args.out} (peak {freq.max():.3f} per analysis)")
 
 def cmd_basemap(args: argparse.Namespace) -> None:
     """Fetch Natural Earth line layers for plotting.
@@ -352,6 +375,14 @@ def main() -> None:
     p.add_argument("--cell-km", type=float, default=50.0)
     p.add_argument("--out", default="density.npz")
     p.set_defaults(func=cmd_density)
+
+    p = sub.add_parser("centers", help="build a high/low pressure center frequency grid")
+    p.add_argument("source", help="Parquet directory from ingest")
+    p.add_argument("--kind", required=True, choices=["H", "L"])
+    p.add_argument("--season", default="all", choices=["all", "winter", "summer"])
+    p.add_argument("--cell-km", type=float, default=50.0)
+    p.add_argument("--out", default="centers.npz")
+    p.set_defaults(func=cmd_centers)    
 
     p = sub.add_parser("basemap", help="fetch Natural Earth outlines for plotting")
     p.add_argument("--dest", default="data/ne")
