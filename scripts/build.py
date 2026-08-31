@@ -373,6 +373,240 @@ def _selection_label(args: argparse.Namespace) -> str:
     return ", ".join(bits)
 
 
+def cmd_trackgrid(args: argparse.Namespace) -> None:
+    """Grid tracks into a density field the ordinary `plot` command can render.
+
+    Three statistics, and they answer different questions:
+
+      path     how often a track passes over each cell -- the storm track
+      genesis  where systems are first analysed -- cyclogenesis regions
+      lysis    where they are last analysed
+
+    `path` reuses `frequency_grid`, because a track is a polyline exactly like
+    a front is: the same "count each feature once per cell" rule applies, and
+    a system that loiters in one cell should count once, not once per analysis.
+    """
+    source = Path(args.source)
+    tracks = pd.read_parquet(source / "tracks.parquet")
+    stats = pd.read_parquet(source / "track_stats.parquet")
+
+    keep = (stats.n_steps >= args.min_steps) & (stats.net_km >= args.min_net_km)
+    if args.season:
+        keep &= stats.genesis_time.dt.month.isin(SEASONS[args.season])
+    selected = stats[keep]
+    if selected.empty:
+        sys.exit("no tracks match that selection")
+
+    grid = g.Grid(cell_km=args.cell_km)
+    n_tracks = len(selected)
+
+    if args.mode == "path":
+        paths = tracks[tracks.track_id.isin(set(selected.track_id))]
+        # frequency_grid keys on (bulletin_id, feature_id) and orders by `ord`.
+        # Built column by column rather than renamed: the tracks table already
+        # has its own bulletin_id, and renaming onto it makes the label
+        # ambiguous rather than replacing it.
+        counts = g.frequency_grid(
+            pd.DataFrame(
+                {
+                    "bulletin_id": paths.track_id.to_numpy(),
+                    "feature_id": "track",
+                    "ord": paths.track_step.to_numpy(),
+                    "lat": paths.lat.to_numpy(),
+                    "lon": paths.lon.to_numpy(),
+                }
+            ),
+            grid,
+        )
+        unit = "track passages per track"
+    else:
+        lat = selected.genesis_lat if args.mode == "genesis" else selected.lysis_lat
+        lon = selected.genesis_lon if args.mode == "genesis" else selected.lysis_lon
+        counts = g.point_grid(
+            pd.DataFrame({"lat": lat.to_numpy(), "lon": lon.to_numpy()}), grid
+        )
+        unit = f"{args.mode} points per track"
+
+    freq = counts / n_tracks
+    kind = "Lows" if args.kind == "L" else "Highs"
+    season = f", {args.season}" if args.season else ""
+    np.savez_compressed(
+        args.out,
+        freq=freq,
+        counts=counts,
+        n_analyses=n_tracks,
+        n_bulletins=n_tracks,
+        cell_km=grid.cell_km,
+        extent=[grid.x_min, grid.x_max, grid.y_min, grid.y_max],
+        crs=grid.crs.to_proj4(),
+        label=f"{kind} track {args.mode}{season}",
+        unit=unit,
+        n_label="tracks",
+    )
+    print(
+        f"{n_tracks} tracks -> {args.out} "
+        f"(peak {freq.max():.3f} {unit})"
+    )
+
+
+def _draw_map_furniture(ax, grid, args, extent):
+    """Draw graticule, coastlines, borders and anchors; return the transformer.
+
+    Shared by every map this script makes, so a density field and a bundle of
+    cyclone tracks land on visibly the same map rather than on two maps that
+    merely resemble each other.
+    """
+    from matplotlib.collections import LineCollection
+
+    x_min, x_max, y_min, y_max = extent
+    fwd = grid.transformer()
+
+    def inside(gx, gy):
+        return (gx > x_min) & (gx < x_max) & (gy > y_min) & (gy < y_max)
+
+    # Graticule: project constant-lat and constant-lon lines into grid metres.
+    # Labeled, because an unlabeled equal-area map of an unfamiliar domain is
+    # very hard to read a pattern off.
+    for lat in range(20, 81, 10):
+        lons = np.linspace(-179, -21, 400)
+        gx, gy = fwd.transform(lons, np.full_like(lons, float(lat)))
+        ax.plot(gx, gy, color="0.6", lw=0.35, ls=(0, (4, 3)), zorder=2)
+        vis = np.flatnonzero(inside(gx, gy))
+        if vis.size:
+            ax.annotate(
+                f"{lat}N", (gx[vis[0]], gy[vis[0]]), color="0.45", fontsize=7,
+                xytext=(3, 2), textcoords="offset points", zorder=5,
+            )
+    for lon in range(-160, -39, 20):
+        lats = np.linspace(10, 84, 400)
+        gx, gy = fwd.transform(np.full_like(lats, float(lon)), lats)
+        ax.plot(gx, gy, color="0.6", lw=0.35, ls=(0, (4, 3)), zorder=2)
+        vis = np.flatnonzero(inside(gx, gy))
+        if vis.size:
+            ax.annotate(
+                f"{abs(lon)}W", (gx[vis[0]], gy[vis[0]]), color="0.45", fontsize=7,
+                xytext=(2, 3), textcoords="offset points", zorder=5,
+            )
+
+    # Coastlines and political boundaries, if they have been fetched.
+    ne_dir = Path(args.ne_dir)
+    have_basemap = bm.available(ne_dir) and not args.no_basemap
+    if have_basemap:
+        # Weighted so the hierarchy reads at a glance: coast heaviest, then
+        # national borders, then states. All dark enough to survive the dark
+        # end of the colormap, which the faint end of a grey ramp does not.
+        styles = {
+            "coastline": dict(color="0.1", lw=0.8),
+            "countries": dict(color="0.15", lw=0.6),
+            "states": dict(color="0.3", lw=0.45),
+        }
+        for name, pieces in bm.projected_segments(ne_dir, fwd).items():
+            if pieces:
+                ax.add_collection(LineCollection(pieces, zorder=4, **styles[name]))
+
+    # City anchors are the fallback when there are no outlines to draw, and
+    # clutter when there are -- so they follow the basemap unless asked for.
+    if args.anchors or not have_basemap:
+        for name, lat, lon in ANCHORS:
+            gx, gy = fwd.transform(lon, lat)
+            if not (x_min < gx < x_max and y_min < gy < y_max):
+                continue
+            ax.plot(gx, gy, "o", ms=2.5, color="0.15", zorder=6)
+            ax.annotate(
+                name, (gx, gy), color="0.15", fontsize=7,
+                xytext=(4, -1), textcoords="offset points", zorder=6,
+            )
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    return fwd
+
+
+def cmd_plot_tracks(args: argparse.Namespace) -> None:
+    """Draw individual track paths on the map.
+
+    A spaghetti plot rather than a density: the point is to look at the
+    tracks themselves, one line per system, and see whether they are shaped
+    like cyclones. Quasi-stationary features are excluded by default, since
+    otherwise several thousand knots of thermal low sit over the Southwest
+    and hide everything that actually travels.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+
+    source = Path(args.source)
+    tracks = pd.read_parquet(source / "tracks.parquet")
+    stats = pd.read_parquet(source / "track_stats.parquet")
+
+    keep = (stats.n_steps >= args.min_steps) & (stats.net_km >= args.min_net_km)
+    if args.season:
+        keep &= stats.genesis_time.dt.month.isin(SEASONS[args.season])
+    selected = stats[keep]
+    if selected.empty:
+        sys.exit("no tracks match that selection")
+
+    # A deterministic sample: 90k lines is neither legible nor quick, and a
+    # fixed seed keeps successive runs comparable.
+    if args.limit and len(selected) > args.limit:
+        selected = selected.sample(args.limit, random_state=0)
+
+    paths = tracks[tracks.track_id.isin(set(selected.track_id))]
+    paths = paths.sort_values(["track_id", "track_step"])
+
+    grid = g.Grid(cell_km=args.cell_km)
+    extent = (grid.x_min, grid.x_max, grid.y_min, grid.y_max)
+
+    fig, ax = plt.subplots(figsize=(11, 8.5), dpi=args.dpi)
+    ax.set_facecolor("white")
+    fwd = _draw_map_furniture(ax, grid, args, extent)
+
+    x, y = fwd.transform(paths.lon.to_numpy(), paths.lat.to_numpy())
+    ids = paths.track_id.to_numpy()
+    # Split at track boundaries so consecutive systems are not joined by a
+    # line across the continent.
+    breaks = np.flatnonzero(ids[1:] != ids[:-1]) + 1
+    segments = [
+        seg for seg in np.split(np.column_stack([x, y]), breaks) if len(seg) >= 2
+    ]
+
+    # Colour by minimum central pressure: the deep systems are the ones worth
+    # picking out of the tangle.
+    depth = selected.set_index("track_id").min_pressure_hpa
+    order = pd.unique(ids)
+    colours = depth.reindex(order).to_numpy()
+
+    lines = LineCollection(
+        segments, cmap=args.cmap, linewidths=args.linewidth,
+        alpha=args.alpha, zorder=3,
+    )
+    lines.set_array(colours[: len(segments)])
+    ax.add_collection(lines)
+
+    if args.genesis:
+        gx, gy = fwd.transform(
+            selected.genesis_lon.to_numpy(), selected.genesis_lat.to_numpy()
+        )
+        ax.plot(gx, gy, ".", ms=1.6, color="0.15", alpha=0.5, zorder=5)
+
+    kind = "Lows" if args.kind == "L" else "Highs"
+    season = f", {args.season}" if args.season else ""
+    ax.set_title(
+        f"{kind} tracks{season}\n"
+        f"{len(segments):,} of {keep.sum():,} tracks with "
+        f"{args.min_steps}+ steps and {args.min_net_km:g}+ km displacement"
+    )
+    fig.colorbar(
+        lines, ax=ax, shrink=0.7, label="minimum central pressure (hPa)"
+    )
+    fig.savefig(args.out, bbox_inches="tight")
+    print(f"wrote {args.out}  ({len(segments)} tracks drawn)")
+
+
 def cmd_plot(args: argparse.Namespace) -> None:
     """Render a density .npz to PNG.
 
@@ -395,6 +629,9 @@ def cmd_plot(args: argparse.Namespace) -> None:
     label = str(z["label"]) if "label" in z else Path(args.source).stem
     n = int(z["n_analyses"]) if "n_analyses" in z else int(z["n_bulletins"])
     unit = str(z["unit"]) if "unit" in z else "crossings per analysis"
+    # Track grids are counted in tracks, not analyses; saying "analyses" for
+    # them would misstate the sample size in the one place a reader checks it.
+    n_label = str(z["n_label"]) if "n_label" in z else "analyses"
 
     if is_intensity:
         # Pressure is not a density: it has no meaningful zero, empty cells
@@ -431,75 +668,10 @@ def cmd_plot(args: argparse.Namespace) -> None:
         vmax=vmax,
     )
 
-    # Graticule: project constant-lat and constant-lon lines into grid metres.
-    # Labeled, because an unlabeled equal-area map of an unfamiliar domain is
-    # very hard to read a pattern off.
     grid = g.Grid(cell_km=float(z["cell_km"]))
-    fwd = grid.transformer()
+    fwd = _draw_map_furniture(ax, grid, args, (x_min, x_max, y_min, y_max))
 
-    def inside(gx, gy):
-        return (gx > x_min) & (gx < x_max) & (gy > y_min) & (gy < y_max)
-
-    for lat in range(20, 81, 10):
-        lons = np.linspace(-179, -21, 400)
-        gx, gy = fwd.transform(lons, np.full_like(lons, float(lat)))
-        ax.plot(gx, gy, color="0.6", lw=0.35, ls=(0, (4, 3)), zorder=2)
-        vis = np.flatnonzero(inside(gx, gy))
-        if vis.size:
-            ax.annotate(
-                f"{lat}N", (gx[vis[0]], gy[vis[0]]), color="0.45", fontsize=7,
-                xytext=(3, 2), textcoords="offset points", zorder=5,
-            )
-    for lon in range(-160, -39, 20):
-        lats = np.linspace(10, 84, 400)
-        gx, gy = fwd.transform(np.full_like(lats, float(lon)), lats)
-        ax.plot(gx, gy, color="0.6", lw=0.35, ls=(0, (4, 3)), zorder=2)
-        vis = np.flatnonzero(inside(gx, gy))
-        if vis.size:
-            ax.annotate(
-                f"{abs(lon)}W", (gx[vis[0]], gy[vis[0]]), color="0.45", fontsize=7,
-                xytext=(2, 3), textcoords="offset points", zorder=5,
-            )
-
-    # Coastlines and political boundaries, if they have been fetched.
-    from matplotlib.collections import LineCollection
-
-    ne_dir = Path(args.ne_dir)
-    have_basemap = bm.available(ne_dir) and not args.no_basemap
-    if have_basemap:
-        # Weighted so the hierarchy reads at a glance: coast heaviest, then
-        # national borders, then states. All dark enough to survive the dark
-        # end of the colormap, which the faint end of a grey ramp does not.
-        styles = {
-            "coastline": dict(color="0.1", lw=0.8),
-            "countries": dict(color="0.15", lw=0.6),
-            "states": dict(color="0.3", lw=0.45),
-        }
-        segments = bm.projected_segments(ne_dir, fwd)
-        for name, pieces in segments.items():
-            if pieces:
-                ax.add_collection(
-                    LineCollection(pieces, zorder=4, **styles[name])
-                )
-
-    # City anchors are the fallback when there are no outlines to draw, and
-    # clutter when there are -- so they follow the basemap unless asked for.
-    if args.anchors or not have_basemap:
-        for name, lat, lon in ANCHORS:
-            gx, gy = fwd.transform(lon, lat)
-            if not (x_min < gx < x_max and y_min < gy < y_max):
-                continue
-            ax.plot(gx, gy, "o", ms=2.5, color="0.15", zorder=6)
-            ax.annotate(
-                name, (gx, gy), color="0.15", fontsize=7,
-                xytext=(4, -1), textcoords="offset points", zorder=6,
-            )
-
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    subtitle = f"{n:,} analyses, {grid.cell_km:g} km equal-area cells"
+    subtitle = f"{n:,} {n_label}, {grid.cell_km:g} km equal-area cells"
     if not is_intensity:
         subtitle += f", peak {np.nanmax(field):.3f}"
     ax.set_title(f"{label}\n{subtitle}")
@@ -565,6 +737,41 @@ def main() -> None:
     )
     p.add_argument("--out", default="data/tracks")
     p.set_defaults(func=cmd_track)
+
+    p = sub.add_parser("trackgrid", help="grid tracks into a density .npz")
+    p.add_argument("source", default="data/tracks", nargs="?",
+                   help="directory written by track")
+    p.add_argument("--mode", default="path", choices=["path", "genesis", "lysis"])
+    p.add_argument("--kind", default="L", choices=["H", "L"], help="for the title")
+    p.add_argument("--season", choices=list(SEASONS))
+    p.add_argument("--min-steps", type=int, default=8)
+    p.add_argument("--min-net-km", type=float, default=500.0)
+    p.add_argument("--cell-km", type=float, default=150.0)
+    p.add_argument("--out", default="trackgrid.npz")
+    p.set_defaults(func=cmd_trackgrid)
+
+    p = sub.add_parser("plot-tracks", help="draw track paths on the map")
+    p.add_argument("source", default="data/tracks", nargs="?",
+                   help="directory written by track")
+    p.add_argument("--kind", default="L", choices=["H", "L"], help="for the title")
+    p.add_argument("--season", choices=list(SEASONS))
+    p.add_argument("--min-steps", type=int, default=8,
+                   help="at 3-hourly, 8 steps is a day")
+    p.add_argument("--min-net-km", type=float, default=500.0,
+                   help="exclude quasi-stationary features")
+    p.add_argument("--limit", type=int, default=1500,
+                   help="sample this many tracks; 0 draws all")
+    p.add_argument("--genesis", action="store_true", help="mark genesis points")
+    p.add_argument("--cell-km", type=float, default=50.0, help="map extent only")
+    p.add_argument("--cmap", default="viridis")
+    p.add_argument("--linewidth", type=float, default=0.5)
+    p.add_argument("--alpha", type=float, default=0.55)
+    p.add_argument("--dpi", type=int, default=140)
+    p.add_argument("--out", default="tracks.png")
+    p.add_argument("--anchors", action="store_true")
+    p.add_argument("--ne-dir", default="data/ne")
+    p.add_argument("--no-basemap", action="store_true")
+    p.set_defaults(func=cmd_plot_tracks)
 
     p = sub.add_parser("basemap", help="fetch Natural Earth outlines for plotting")
     p.add_argument("--dest", default="data/ne")

@@ -69,6 +69,23 @@ python scripts/build.py track     data/parquet --kind L --res HR --out data/trac
 distance plus a pressure-jump penalty, under a speed cap). Tracking the full
 HR low record takes about 18 seconds and yields ~90,600 tracks.
 
+Once tracks exist there are two ways to look at them:
+
+```bash
+# the tracks themselves, one line per system, coloured by depth
+python scripts/build.py plot-tracks data/tracks --season DJF --out tracks.png
+
+# tracks as a griddable field, rendered by the ordinary plot command
+python scripts/build.py trackgrid data/tracks --mode path    --season DJF --out storm_track.npz
+python scripts/build.py trackgrid data/tracks --mode genesis --season DJF --out genesis.npz
+python scripts/build.py plot storm_track.npz --out storm_track.png
+```
+
+`trackgrid --mode` is `path` (how often a track crosses each cell — the storm
+track), `genesis`, or `lysis`. Both commands default to tracks of 8+ steps
+and 500+ km displacement, which is what excludes the quasi-stationary
+features described below; pass `--min-net-km 0` to see everything.
+
 `density` takes `--month N` or `--season DJF|MAM|JJA|SON`. `basemap` fetches
 3.3 MB of Natural Earth 1:50m line layers (coastline, national borders,
 states and provinces) into `data/ne/`. It is a separate command on purpose:
