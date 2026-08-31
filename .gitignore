@@ -1,7 +1,9 @@
-# Data — the archive is 55 MB and re-downloadable; derived Parquet is rebuildable
+# Data — the archive is 77 MB and re-downloadable; derived Parquet is rebuildable
 data/
 *.npz
 *.parquet
+*.png
+ingest.log
 
 # Python
 __pycache__/

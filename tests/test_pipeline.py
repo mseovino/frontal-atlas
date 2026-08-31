@@ -142,3 +142,156 @@ def test_frequency_accumulates_across_bulletins(tmp_path):
     counts = g.frequency_grid(points[points.ftype == "COLD"], g.Grid(cell_km=100.0))
     # Identical fronts at two times: cells they share should now read 2.
     assert counts.max() == 2
+
+
+def make_real_bulletin(tmp_path: Path, name: str, valid: str, res: str = "HR") -> Path:
+    """A bulletin in the layout the published archive actually uses.
+
+    Front groups are lists, one object per front, each carrying its own
+    lats/lons and a strength label, and longitudes are already signed east.
+    A front type with nothing analyzed comes through as null.
+    """
+    doc = {
+        "bulletinType": res,
+        "createDate": valid,
+        "validDate": valid,
+        "Lows": {"lats": [42.0], "lons": [-95.0], "pressures": [996.0]},
+        "Highs": {"lats": [35.0], "lons": [-75.0], "pressures": [1024.0]},
+        "ColdFronts": [
+            {"lats": [42.0, 38.0, 34.0], "lons": [-95.0, -92.0, -90.0],
+             "strength": "moderate"},
+            {"lats": [50.0, 48.0], "lons": [-120.0, -118.0], "strength": "weak"},
+        ],
+        "StationaryFronts": [
+            {"lats": [31.0, 30.0], "lons": [-97.0, -98.0], "strength": "weak"}
+        ],
+        "WarmFronts": None,
+        "OccludedFronts": None,
+        "Troughs": [],
+    }
+    path = tmp_path / name
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def test_real_archive_layout_parses(tmp_path):
+    """The published archive stores fronts as lists of objects, not arrays."""
+    make_real_bulletin(tmp_path, "a.json", "2014-01-22 09:00:00")
+    centers, points, report = ld.load(tmp_path)
+
+    assert report.skipped == 0
+    assert report.polylines == 3  # two cold, one stationary
+    assert report.centers == 2
+    assert set(points.ftype.unique()) == {"COLD", "STNRY"}
+    assert points.groupby("feature_id").ngroups == 3
+
+
+def test_null_front_group_is_not_an_error(tmp_path):
+    """A front type with nothing analyzed is null, and that is routine."""
+    make_real_bulletin(tmp_path, "a.json", "2014-01-22 09:00:00")
+    _, points, report = ld.load(tmp_path)
+
+    assert report.skipped == 0
+    assert "WARM" not in set(points.ftype.unique())
+
+
+def test_strength_label_is_kept(tmp_path):
+    make_real_bulletin(tmp_path, "a.json", "2014-01-22 09:00:00")
+    _, points, _ = ld.load(tmp_path)
+
+    cold = points[points.ftype == "COLD"]
+    assert set(cold.strength.unique()) == {"moderate", "weak"}
+
+
+def test_signed_east_longitudes_pass_through_unflipped(tmp_path):
+    """Archive longitudes are already signed east; flipping them would be a bug."""
+    make_real_bulletin(tmp_path, "a.json", "2014-01-22 09:00:00")
+    centers, points, report = ld.load(tmp_path)
+
+    assert report.lon_flipped == 0
+    assert centers.lon.max() < 0
+    assert points.lon.min() == pytest.approx(-120.0)
+
+
+def test_positive_longitudes_are_flipped_and_counted(tmp_path):
+    """The ASCII convention still parses, but the flip is reported, not silent."""
+    make_bulletin(tmp_path, "a.json", "2020-01-15T12:00:00Z")
+    _, _, report = ld.load(tmp_path)
+
+    assert report.lon_flipped > 0
+
+
+def test_short_front_is_dropped_and_counted(tmp_path):
+    """A one-vertex front cannot make a segment; it should not vanish silently."""
+    doc = {
+        "bulletinType": "HR",
+        "createDate": "2014-01-22 09:00:00",
+        "validDate": "2014-01-22 09:00:00",
+        "ColdFronts": [{"lats": [40.0], "lons": [-90.0], "strength": "weak"}],
+    }
+    (tmp_path / "a.json").write_text(json.dumps(doc))
+
+    _, points, report = ld.load(tmp_path)
+    assert report.polylines == 0
+    assert report.degenerate == 1
+    assert points.empty
+
+
+def test_streaming_ingest_matches_in_memory_load(tmp_path):
+    """`ingest` chunks the archive; it must not change what comes out."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(5):
+        make_real_bulletin(src, f"b{i}.json", f"2014-01-2{i} 09:00:00")
+
+    _, points, report = ld.load(src)
+    out = tmp_path / "pq"
+    stream = ld.ingest(src, out, chunk_files=2)
+
+    import pandas as pd
+
+    written = pd.read_parquet(out / "points")
+    assert stream.bulletins == report.bulletins == 5
+    assert stream.polylines == report.polylines
+    assert len(written) == len(points)
+    assert set(written.bulletin_id) == set(points.bulletin_id)
+
+
+def test_impossible_coordinates_are_dropped_and_counted(tmp_path):
+    """The archive holds a handful of latitudes above 90; they project to inf."""
+    doc = {
+        "bulletinType": "LR",
+        "createDate": "2004-07-23 15:00:00",
+        "validDate": "2004-07-23 15:00:00",
+        "ColdFronts": [
+            {"lats": [40.0, 98.0, 36.0], "lons": [-90.0, -5.0, -88.0],
+             "strength": "weak"}
+        ],
+        "Lows": {"lats": [97.0, 42.0], "lons": [-6.0, -95.0], "pressures": [996.0, 1000.0]},
+    }
+    (tmp_path / "a.json").write_text(json.dumps(doc))
+
+    centers, points, report = ld.load(tmp_path)
+    assert report.out_of_range == 2
+    assert report.polylines == 1
+    assert points.lat.max() <= 90.0
+    assert centers.lat.max() <= 90.0
+    # The surviving vertices keep their original indices, so the gap is visible.
+    assert list(points.ord) == [0, 2]
+
+
+def test_feature_left_with_one_vertex_is_dropped(tmp_path):
+    """Dropping bad vertices can leave too little to make a segment."""
+    doc = {
+        "bulletinType": "LR",
+        "createDate": "2004-07-23 15:00:00",
+        "validDate": "2004-07-23 15:00:00",
+        "ColdFronts": [{"lats": [98.0, 36.0], "lons": [-5.0, -88.0], "strength": "weak"}],
+    }
+    (tmp_path / "a.json").write_text(json.dumps(doc))
+
+    _, points, report = ld.load(tmp_path)
+    assert report.out_of_range == 1
+    assert report.polylines == 0
+    assert report.degenerate == 1
+    assert points.empty

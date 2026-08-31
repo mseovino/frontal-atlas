@@ -140,6 +140,18 @@ def frequency_grid(
     whatever subset you care about (one front type, one month, one decade).
     Divide the result by the number of bulletins in that subset to get a
     frequency per analysis.
+
+    Densification happens in the projected plane rather than by calling the
+    geodesic routine per leg. A season of troughs is ~130k features and ~600k
+    legs, and a Python loop with a pyproj call inside it takes minutes; this
+    is the same computation done once over flat arrays.
+
+    The accuracy cost is nil at this scale. `resample_polyline` follows the
+    great circle because a straight line in *lat/lon* diverges badly from one
+    at high latitude, but a straight line in an equal-area projection does
+    not: over the 10-100 km legs the bulletins contain, the two agree to well
+    under a kilometre, against 50 km cells. `resample_polyline` remains the
+    reference implementation and is what the resampling tests exercise.
     """
     grid = grid or Grid()
     # Sub-cell sampling so a front cannot step over a cell without landing in it.
@@ -148,16 +160,50 @@ def frequency_grid(
     if points.empty:
         return counts
 
-    for _, feature in points.sort_values("ord").groupby(["bulletin_id", "feature_id"]):
-        lat, lon = resample_polyline(
-            feature.lat.to_numpy(), feature.lon.to_numpy(), spacing_km
-        )
-        row, col = grid.to_cells(lon, lat)
-        keep = row >= 0
-        if not keep.any():
-            continue
-        # Unique cells only: one crossing counts once, however densely sampled.
-        flat = np.unique(row[keep] * grid.nx + col[keep])
-        np.add.at(counts.reshape(-1), flat, 1)
+    df = points.sort_values(["bulletin_id", "feature_id", "ord"])
+    feature = df.groupby(["bulletin_id", "feature_id"], sort=False).ngroup().to_numpy()
+    x, y = grid.transformer().transform(df.lon.to_numpy(), df.lat.to_numpy())
 
-    return counts
+    # Legs are consecutive rows belonging to the same feature.
+    same = feature[1:] == feature[:-1]
+    x0, y0 = x[:-1][same], y[:-1][same]
+    x1, y1 = x[1:][same], y[1:][same]
+    leg_feature = feature[:-1][same]
+
+    finite = np.isfinite(x0) & np.isfinite(y0) & np.isfinite(x1) & np.isfinite(y1)
+    x0, y0 = x0[finite], y0[finite]
+    x1, y1 = x1[finite], y1[finite]
+    leg_feature = leg_feature[finite]
+    if x0.size == 0:
+        return counts
+
+    # Split every leg into whole steps no longer than the sampling spacing.
+    n_sub = np.maximum(
+        1, np.ceil(np.hypot(x1 - x0, y1 - y0) / (spacing_km * 1000.0)).astype(np.int64)
+    )
+    leg = np.repeat(np.arange(n_sub.size), n_sub)
+    offset = np.arange(n_sub.sum()) - np.repeat(
+        np.concatenate([[0], np.cumsum(n_sub)[:-1]]), n_sub
+    )
+    t = offset / n_sub[leg]
+
+    # t runs [0, 1) per leg, so leg endpoints are appended once rather than
+    # being sampled twice where one leg ends and the next begins.
+    px = np.concatenate([x0[leg] + t * (x1[leg] - x0[leg]), x1])
+    py = np.concatenate([y0[leg] + t * (y1[leg] - y0[leg]), y1])
+    pf = np.concatenate([leg_feature[leg], leg_feature])
+
+    step = grid.cell_km * 1000.0
+    col = np.floor((px - grid.x_min) / step).astype(np.int64)
+    row = np.floor((py - grid.y_min) / step).astype(np.int64)
+    keep = (col >= 0) & (col < grid.nx) & (row >= 0) & (row < grid.ny)
+    if not keep.any():
+        return counts
+
+    cell = row[keep] * grid.nx + col[keep]
+    # Unique (feature, cell) pairs: one crossing counts once, however densely
+    # sampled. Packing both into one integer keeps this a 1-D unique.
+    pairs = np.unique(pf[keep] * (grid.ny * grid.nx) + cell)
+    flat = pairs % (grid.ny * grid.nx)
+
+    return np.bincount(flat, minlength=grid.ny * grid.nx).reshape(grid.shape)
