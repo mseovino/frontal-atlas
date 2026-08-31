@@ -207,3 +207,26 @@ def frequency_grid(
     flat = pairs % (grid.ny * grid.nx)
 
     return np.bincount(flat, minlength=grid.ny * grid.nx).reshape(grid.shape)
+
+
+def point_grid(centers: pd.DataFrame, grid: Grid | None = None) -> np.ndarray:
+    """Count pressure centers per cell.
+
+    Centers are points, not lines, so there is nothing to resample and nothing
+    to deduplicate -- two lows in one cell in one analysis are two lows. That
+    makes this a plain 2-D histogram in the equal-area plane, and it is a
+    different statistic from `frequency_grid`: centers per analysis, not the
+    fraction of analyses with a crossing.
+    """
+    grid = grid or Grid()
+    counts = np.zeros(grid.shape, dtype=np.int64)
+    if centers.empty:
+        return counts
+
+    row, col = grid.to_cells(centers.lon.to_numpy(), centers.lat.to_numpy())
+    keep = row >= 0
+    if not keep.any():
+        return counts
+
+    flat = row[keep] * grid.nx + col[keep]
+    return np.bincount(flat, minlength=grid.ny * grid.nx).reshape(grid.shape)

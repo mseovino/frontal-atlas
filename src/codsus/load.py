@@ -132,6 +132,19 @@ def _polylines(group: object) -> list[tuple[list[float], list[float], str | None
         out.append((list(lats), list(lons), group.get("strength")))
     return out
 
+def center_frequency_grid(centers: pd.DataFrame, grid: Grid | None = None) -> np.ndarray:
+    """Count how many analyses placed a center (H or L) in each cell."""
+    grid = grid or Grid()
+    counts = np.zeros(grid.shape, dtype=np.int64)
+    if centers.empty:
+        return counts
+    row, col = grid.to_cells(centers.lon.to_numpy(), centers.lat.to_numpy())
+    keep = row >= 0
+    if not keep.any():
+        return counts
+    flat = row[keep] * grid.nx + col[keep]
+    np.add.at(counts.reshape(-1), flat, 1)
+    return counts
 
 def _normalize_lon(lon: float, report: LoadReport | None = None) -> float:
     """Return longitude as signed degrees east in [-180, 180].
