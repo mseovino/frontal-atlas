@@ -1,0 +1,20 @@
+# Data — the archive is 55 MB and re-downloadable; derived Parquet is rebuildable
+data/
+*.npz
+*.parquet
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
