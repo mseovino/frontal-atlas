@@ -121,6 +121,7 @@ as `python analysis/<name>.py`. Generated figures, grids and pickles go to
 | `handbook_data.py`, `handbook_figures.py` | Monthly fronts, highs and lows, central-pressure ranges, real cases, dryline and squall-line data; one consistent figure style |
 | `type_counts.py`, `front_share.py` | Per-type counts at several cell sizes; where one type is common absolutely and as a share of all fronts |
 | `composite_build.py`, `composite_neighbours.py` | Front positions relative to the analysed low, split by depth and by whether another low is nearby |
+| `composite_final.py`, `composite_final_figs.py` | The finished composite: triple points found from the drawn fronts, the full ocean storm tracks, each low rotated onto its direction of travel from its track |
 | `composite_neighbour_stats.py`, `composite_truncation.py` | How crowded analysed lows are; how many composite lows sit near a chart edge |
 | `dryline_position.py` | Dryline longitude by month and hour at four latitudes |
 | `squall_lines.py` | Where and when squall lines are drawn |
@@ -130,6 +131,8 @@ as `python analysis/<name>.py`. Generated figures, grids and pickles go to
 | `hour_domain.py`, `manual_checks.py` | Synoptic versus intermediate hours: coverage, and the per-type effect counted by feature centroid |
 | `stage_detection.py` | Why weakening fronts are tagged three times as often as developing ones |
 | `trend_drawn_length.py`, `trend_breakpoint.py`, `trough_trend_map.py` | How much is drawn per map over time, and when the trough increase happened |
+| `consistency_monitor.py` | Monthly drawing-consistency check: drawn length, piece length, hour ratios and stage use, flagged against both the recent past and a fixed reference period |
+| `expect_data.py`, `expect_page.py` | Month-by-month maps and seasonal central-pressure ranges for the training page |
 
 Three rules came out of this work and every script follows them. Count
 features by where they are centred, not by whether they touch a region:
@@ -249,10 +252,12 @@ full period. Do not straddle it.
       developing/weakening stages kept separate
 - [x] Cyclone tracking: link centers across bulletins (~400 km/3h cap plus a
       pressure-continuity term), track and genesis density
-- [ ] Cyclone-relative frontal composite, finished: triple-point handling,
+- [x] Cyclone-relative frontal composite, finished: triple-point handling,
       the full ocean storm-track termini, rotation onto storm motion
-- [ ] Drawing-consistency monitor: per-type rates by hour, drawn length and
+- [x] Drawing-consistency monitor: per-type rates by hour, drawn length and
       stage use over time, so practice changes show up as they happen
+- [ ] Fronts and heavy rain: how often extreme precipitation falls near an
+      analysed stationary front or trough (needs Stage IV)
 - [ ] Front motion: match segments between consecutive analyses, compute
       normal displacement, map where boundaries stall by season — the
       climatological prior for excessive rainfall that doesn't currently exist
