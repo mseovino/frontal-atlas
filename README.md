@@ -1,33 +1,42 @@
 # frontal-atlas
 
-A climatology of North American fronts and pressure centers built from the
-NWS Coded Surface Bulletin — the machine-readable record of every surface
-analysis WPC has drawn since 2003.
+A climatology of North American fronts and pressure centers built from what
+WPC's surface analysts actually drew: sixteen years of hand analyses, counted.
 
 Every published frontal climatology is objective, derived from reanalysis
-thermal-gradient fields. This one is built from what human analysts actually
-drew. The difference between the two is the interesting part.
+thermal-gradient fields. This one is built from the analyses themselves, which
+makes it two things at once: a climatology of the atmosphere, and a record of
+analysis practice. Several findings here turned out to be the second kind, and
+`analysis/` keeps the scripts that separate them.
 
 ## Getting the data
 
-The bulletins are ASCII files giving locations of fronts, troughs, and high
-and low centers, broadcast on NOAAPort since 2003 at 1° lat/lon precision,
-with a 0.1° high-resolution version added in 2009. WPC serves only a rolling
-two-week window, so use the archive NCICS published on Zenodo:
+Two archives, one per job.
+
+**Fronts** come from the NOAA Unified Surface Analysis front archive (Zenodo
+[7505022](https://zenodo.org/records/7505022), CC-BY-4.0): one XML per
+analysis, December 2006 to December 2022, exported from the graphical analysis
+files with each feature's type intact. Unlike the coded bulletin below, it keeps
+drylines and squall lines separate from troughs and marks fronts as developing
+or weakening. `ingest-fronts` reads the 148 MB tarball in place and writes a
+55 MB row-per-polyline Parquet store at 0.01 degree precision.
+
+**Pressure centers** come from the NWS Coded Surface Bulletin archive NCICS
+published on Zenodo:
 
 - JSON, ready to use: https://zenodo.org/records/2646544
 - Raw ASCII, if you want to parse it yourself: https://zenodo.org/records/2642801
 
 The JSON archive is a single 77 MB tarball, `CODSUS_JSON_2003-2018.tgz`,
-CC-BY-SA-4.0, unpacking to 75,336 files under `CODSUS_JSON/{LR,HR}/YYYY/MM/`.
-Note the end date: **the archive stops at 2018-12-31**, so "2003–" means
-2003–2018 here, and extending to the present means a separate ingest from
-another source. For anything current, MetPy has `parse_wpc_surface_bulletin`.
+CC-BY-SA-4.0, covering 2003-2018 at 1 degree precision with a 0.1 degree
+high-resolution version from 2009. Its fronts are not used any more: the
+bulletin format codes troughs, outflow boundaries, squall lines and drylines
+all as `TROF`, so no dryline can be recovered from it.
 
 ```bash
 mkdir -p data/raw
-curl -L -o data/raw/CODSUS_JSON_2003-2018.tgz \
-  https://zenodo.org/api/records/2646544/files/CODSUS_JSON_2003-2018.tgz/content
+curl -L -o data/raw/front_xmls.tar.gz   "https://zenodo.org/api/records/7505022/files/front_xmls.tar.gz/content"
+curl -L -o data/raw/CODSUS_JSON_2003-2018.tgz   https://zenodo.org/api/records/2646544/files/CODSUS_JSON_2003-2018.tgz/content
 mkdir -p data/raw/json && tar xzf data/raw/CODSUS_JSON_2003-2018.tgz -C data/raw/json
 ```
 
@@ -50,7 +59,8 @@ python -m venv .venv && .venv/Scripts/python.exe -m pip install -e ".[dev]"
 
 ```bash
 python scripts/build.py basemap                     # once: coastlines and borders
-python scripts/build.py ingest data/raw/json data/parquet --progress
+python scripts/build.py ingest-fronts data/raw/front_xmls.tar.gz data/parquet/points --progress
+python scripts/build.py ingest data/raw/json data/parquet --progress   # pressure centers
 python scripts/build.py density data/parquet --ftype COLD --month 3 --out mar_cold.npz
 python scripts/build.py plot mar_cold.npz --out mar_cold.png
 ```
@@ -98,6 +108,36 @@ file chunks and appends year-partitioned Parquet, because the whole thing does
 not fit in memory as Python objects. After that everything reads Parquet, and
 DuckDB queries it in place without a load step.
 
+## Analysis scripts
+
+`scripts/build.py` builds the stores and the standard grids. Everything past
+that lives in `analysis/`, one script per question, each run from the repo root
+as `python analysis/<name>.py`. Generated figures, grids and pickles go to
+`outputs/`, which is gitignored.
+
+| Script | Question |
+|---|---|
+| `atlas_synoptic.py` | Frequency of each front type by season, synoptic hours only |
+| `handbook_data.py`, `handbook_figures.py` | Monthly fronts, highs and lows, central-pressure ranges, real cases, dryline and squall-line data; one consistent figure style |
+| `type_counts.py`, `front_share.py` | Per-type counts at several cell sizes; where one type is common absolutely and as a share of all fronts |
+| `composite_build.py`, `composite_neighbours.py` | Front positions relative to the analysed low, split by depth and by whether another low is nearby |
+| `composite_neighbour_stats.py`, `composite_truncation.py` | How crowded analysed lows are; how many composite lows sit near a chart edge |
+| `dryline_position.py` | Dryline longitude by month and hour at four latitudes |
+| `squall_lines.py` | Where and when squall lines are drawn |
+| `lee_trough.py`, `cad_proxy_sweep.py`, `cad_trough_test.py` | The Appalachian lee trough, and why damming cannot be separated from it in this archive |
+| `seasonal_march.py` | 31-day running-window animation of front frequency |
+| `passage_climatology.py`, `passage_sensitivity.py` | Frontal passages at one point, and how much the count depends on radius and merge tolerance |
+| `hour_domain.py`, `manual_checks.py` | Synoptic versus intermediate hours: coverage, and the per-type effect counted by feature centroid |
+| `stage_detection.py` | Why weakening fronts are tagged three times as often as developing ones |
+| `trend_drawn_length.py`, `trend_breakpoint.py`, `trough_trend_map.py` | How much is drawn per map over time, and when the trough increase happened |
+
+Three rules came out of this work and every script follows them. Count
+features by where they are centred, not by whether they touch a region:
+overlap counting pulls in long ocean fronts. Use the four synoptic hours for
+anything per-type, because intermediate maps cover less area and carry more
+stationary fronts and troughs. And read every trend against the dates of known
+changes at the desk before calling it atmospheric.
+
 ## Design notes
 
 **Longitude sign.** The raw ASCII bulletins encode longitude as positive
@@ -110,6 +150,9 @@ east-of-Greenwich point would be mangled by the same rule, and that belongs in
 a number you can check, not in a map that looks plausible. A full ingest of
 the JSON archive reports zero flips. If yours doesn't, find out why before
 trusting the output.
+
+**Legacy CODSUS notes.** The next few notes describe the coded-bulletin ingest,
+which now supplies pressure centers only.
 
 **Front groups are lists, not arrays.** Pressure-center groups really are
 objects of parallel arrays, `{lats, lons, pressures}`. Front groups are not,
@@ -202,9 +245,14 @@ full period. Do not straddle it.
 
 - [x] Loader, tidy tables, Parquet output
 - [x] Equal-area frontal density
-- [ ] Cyclone tracking: link centers across bulletins (~400 km/3h cap plus a
-      pressure-continuity term), then track/genesis/lysis density and
-      deepening rates
+- [x] Unified Surface Analysis front ingest, with drylines, squall lines and
+      developing/weakening stages kept separate
+- [x] Cyclone tracking: link centers across bulletins (~400 km/3h cap plus a
+      pressure-continuity term), track and genesis density
+- [ ] Cyclone-relative frontal composite, finished: triple-point handling,
+      the full ocean storm-track termini, rotation onto storm motion
+- [ ] Drawing-consistency monitor: per-type rates by hour, drawn length and
+      stage use over time, so practice changes show up as they happen
 - [ ] Front motion: match segments between consecutive analyses, compute
       normal displacement, map where boundaries stall by season — the
       climatological prior for excessive rainfall that doesn't currently exist
@@ -226,3 +274,10 @@ and conventions all changed over 20+ years, and the 2009 resolution jump is a
 step change in the data itself. Any trend you find is a mixture of atmospheric
 signal and analysis practice, and separating them is a research question, not
 a preprocessing step.
+
+Two practice effects are already measured. Trough drawing over the Lower 48
+roughly doubled between 2007-10 and 2019-22, in total length and not just
+count, with most of the rise after 2017; it is not tied to any known tool
+change. And inside WPC's own area, stationary fronts and troughs are drawn
+about 20-25% more often on intermediate maps than synoptic ones, while the
+classical front types are flat across hours.

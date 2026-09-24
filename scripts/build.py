@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from codsus import basemap as bm  # noqa: E402
 from codsus import grid as g  # noqa: E402
+from codsus import fronts_xml as fx  # noqa: E402
 from codsus import load as ld  # noqa: E402
 
 
@@ -64,6 +65,37 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print(f"  ... and {len(report.problems) - 10} more")
 
     print(f"wrote {args.dest}/centers and {args.dest}/points")
+
+def cmd_ingest_fronts(args: argparse.Namespace) -> None:
+    """Parse the Unified Surface Analysis front XML tarball into Parquet.
+
+    Read straight out of the .tar.gz. The archive holds 46,786 small files and
+    unpacking them costs more on Windows than the archive itself.
+    """
+    def progress(seen: int, report: fx.FrontsReport) -> None:
+        print(f"  {seen:>6} analyses  {report.polylines:>9} polylines  "
+              f"{report.vertices:>10} vertices", flush=True)
+
+    report = fx.ingest(
+        Path(args.source), Path(args.dest),
+        chunk_analyses=args.chunk_analyses,
+        progress=progress if args.progress else None,
+    )
+    print(f"parsed {report.analyses} analyses: {report.polylines} polylines, "
+          f"{report.vertices} vertices, {report.skipped} skipped, "
+          f"{report.degenerate} degenerate")
+    if report.unknown_types:
+        # Loud, because an unmapped pgenType is data silently going nowhere.
+        print("  ! unmapped pgenType values (NOT ingested):")
+        for name, n in sorted(report.unknown_types.items(), key=lambda kv: -kv[1]):
+            print(f"      {name}: {n}")
+    for problem in report.problems[:10]:
+        print(f"  ! {problem}")
+    if len(report.problems) > 10:
+        print(f"  ... and {len(report.problems) - 10} more")
+    print(f"wrote {args.dest}")
+
+
 
 def _load_centers(args: argparse.Namespace) -> pd.DataFrame:
     """Read the centers table for one kind, resolution and season.
@@ -246,7 +278,13 @@ def cmd_density(args: argparse.Namespace) -> None:
         Path(args.source) / "points", format="parquet", partitioning="hive"
     )
 
-    period = ds.field("res") == args.res
+    # Two on-disk layouts. The Unified Analysis store keeps one row per
+    # polyline with the vertices in list columns; the CODSUS store keeps one
+    # row per vertex. Detected rather than flagged, so the same command line
+    # works against either source.
+    is_ua = "lat_e2" in dataset.schema.names
+
+    period = ds.scalar(True) if is_ua else (ds.field("res") == args.res)
     if args.start:
         period = period & (ds.field("year") >= pd.Timestamp(args.start).year)
     if args.end:
@@ -270,22 +308,39 @@ def cmd_density(args: argparse.Namespace) -> None:
     # "how far did a cold front reach, given that one was drawn at all", which
     # inflates the field wherever the type is intermittent and quietly makes
     # types and seasons non-comparable.
-    n_analyses = in_window(
-        dataset.to_table(columns=["bulletin_id", "valid_time"], filter=period)
-        .to_pandas()
-    ).bulletin_id.nunique()
+    if is_ua:
+        # The polyline store has no bulletin_id; one analysis is one valid_time.
+        n_analyses = in_window(
+            dataset.to_table(columns=["valid_time"], filter=period).to_pandas()
+        ).valid_time.nunique()
+    else:
+        n_analyses = in_window(
+            dataset.to_table(columns=["bulletin_id", "valid_time"], filter=period)
+            .to_pandas()
+        ).bulletin_id.nunique()
 
     selection = period
     if args.ftype:
         selection = selection & (ds.field("ftype") == args.ftype)
-    points = in_window(
-        dataset.to_table(
-            columns=["bulletin_id", "feature_id", "ord", "lat", "lon", "valid_time"],
-            filter=selection,
-        ).to_pandas()
-    )
 
-    n_bulletins = points.bulletin_id.nunique()
+    if is_ua:
+        raw = in_window(
+            dataset.to_table(
+                columns=["valid_time", "ftype", "stage", "lat_e2", "lon_e2"],
+                filter=selection,
+            ).to_pandas()
+        )
+        points = fx.explode(raw)
+    else:
+        points = in_window(
+            dataset.to_table(
+                columns=["bulletin_id", "feature_id", "ord", "lat", "lon",
+                         "valid_time"],
+                filter=selection,
+            ).to_pandas()
+        )
+
+    n_bulletins = points.bulletin_id.nunique() if len(points) else 0
     if n_analyses == 0:
         sys.exit("no bulletins match that selection")
 
@@ -293,7 +348,7 @@ def cmd_density(args: argparse.Namespace) -> None:
     # and land entirely inside one row of cells. Grid finer than that spacing
     # and the field breaks into latitude stripes that are pure quantization
     # artifact -- one degree of latitude is about 111 km.
-    if args.res == "LR" and args.cell_km < 111.0:
+    if not is_ua and args.res == "LR" and args.cell_km < 111.0:
         print(
             f"  ! {args.cell_km:g} km cells on LR data: 1-degree vertex snapping "
             "will alias into latitude stripes. Use --cell-km 150 or larger.",
@@ -694,14 +749,23 @@ def main() -> None:
     p.add_argument("--progress", action="store_true")
     p.set_defaults(func=cmd_ingest)
 
+    p = sub.add_parser("ingest-fronts",
+                       help="parse Unified Surface Analysis front XML into Parquet")
+    p.add_argument("source", help="front_xmls.tar.gz from Zenodo 7505022")
+    p.add_argument("dest", help="output Parquet directory")
+    p.add_argument("--chunk-analyses", type=int, default=2000)
+    p.add_argument("--progress", action="store_true")
+    p.set_defaults(func=cmd_ingest_fronts)
+
     p = sub.add_parser("density", help="build a frontal frequency grid")
     p.add_argument("source", help="Parquet directory from ingest")
-    p.add_argument("--ftype", choices=list(ld.FRONT_KEYS.values()))
+    p.add_argument("--ftype", choices=sorted(
+        set(ld.FRONT_KEYS.values()) | {t for t, _ in fx.PGEN_TYPES.values()}))
     p.add_argument("--month", type=int)
     p.add_argument("--season", choices=list(SEASONS), help="DJF, MAM, JJA or SON")
     p.add_argument("--start")
     p.add_argument("--end")
-    p.add_argument("--res", default="HR", choices=["HR", "LR"])
+    p.add_argument("--res", default="HR", choices=["HR", "LR", "UA"])
     p.add_argument("--cell-km", type=float, default=50.0)
     p.add_argument("--out", default="density.npz")
     p.set_defaults(func=cmd_density)
@@ -709,7 +773,7 @@ def main() -> None:
     p = sub.add_parser("centers", help="build a high/low pressure center frequency grid")
     p.add_argument("source", help="Parquet directory from ingest")
     p.add_argument("--kind", required=True, choices=["H", "L"])
-    p.add_argument("--res", default="HR", choices=["HR", "LR"])
+    p.add_argument("--res", default="HR", choices=["HR", "LR", "UA"])
     p.add_argument("--season", choices=list(SEASONS), help="DJF, MAM, JJA or SON")
     p.add_argument("--cell-km", type=float, default=150.0)
     p.add_argument("--out", default="centers.npz")
@@ -720,7 +784,7 @@ def main() -> None:
     p = sub.add_parser("intensity", help="mean central pressure grid")
     p.add_argument("source", help="Parquet directory from ingest")
     p.add_argument("--kind", required=True, choices=["H", "L"])
-    p.add_argument("--res", default="HR", choices=["HR", "LR"])
+    p.add_argument("--res", default="HR", choices=["HR", "LR", "UA"])
     p.add_argument("--season", choices=list(SEASONS), help="DJF, MAM, JJA or SON")
     p.add_argument("--cell-km", type=float, default=250.0)
     p.add_argument("--min-count", type=int, default=5)
@@ -730,7 +794,7 @@ def main() -> None:
     p = sub.add_parser("track", help="link pressure centers into tracks over time")
     p.add_argument("source", help="Parquet directory from ingest")
     p.add_argument("--kind", required=True, choices=["H", "L"])
-    p.add_argument("--res", default="HR", choices=["HR", "LR"])
+    p.add_argument("--res", default="HR", choices=["HR", "LR", "UA"])
     p.add_argument(
         "--max-gap-hours", type=float, default=6.0,
         help="never link centers across a longer gap than this",

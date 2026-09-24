@@ -20,3 +20,5 @@ dist/
 .vscode/
 .idea/
 .DS_Store
+private/
+outputs/
