@@ -23,7 +23,7 @@ from matplotlib.patches import Patch
 from matplotlib.ticker import FuncFormatter
 from scipy.ndimage import gaussian_filter
 from common import OUT, ARGS, NO_ANCHORS, REPO, B, box_extent, fx, g, plt
-import front_symbols as fs
+import chart_fronts as cf
 
 # Handbook figures go beside the (private) handbook source that embeds them.
 IMG = REPO / "private" / "handbook" / "img"
@@ -63,24 +63,8 @@ def ramp(hexcol, lo=0.03, hi=0.78):
     return LinearSegmentedColormap.from_list("r", [base(x) for x in np.linspace(lo, hi, 16)])
 
 
-def mapax(ax, extent=NA, labels=False, anchors=False, lw=1.0):
-    n_lines, n_coll = len(ax.lines), len(ax.collections)
-    B._draw_map_furniture(ax, G50, ARGS if anchors else NO_ANCHORS, extent)
-    # Furniture weights are tuned for a full-page map; scale them with panel
-    # size so coastlines do not swamp the data on small multiples.
-    if lw != 1.0:
-        for ln in ax.lines[n_lines:]:
-            ln.set_linewidth(ln.get_linewidth() * lw)
-        for co in ax.collections[n_coll:]:
-            co.set_linewidth(np.asarray(co.get_linewidth()) * lw)
-    if not labels:
-        for t in list(ax.texts):
-            if GRAT.match(t.get_text().strip()):
-                t.remove()
-    ax.set_xlim(extent[0], extent[1]); ax.set_ylim(extent[2], extent[3])
-    ax.set_aspect("equal"); ax.set_xticks([]); ax.set_yticks([])
-    for s in ax.spines.values():
-        s.set_edgecolor(RULE)
+def mapax(ax, extent=NA, **kw):
+    cf.mapax(ax, extent, **kw)
 
 
 def pct(vmax):
@@ -249,19 +233,7 @@ def compax(ax, stratum, lw=1.6, rings=True, lab=True):
         s.set_edgecolor(RULE)
 
 
-fig, ax = plt.subplots(figsize=(7.2, 7.0))
-compax(ax, "isolated", lw=1.9)
-box = dict(boxstyle="round,pad=0.3", fc="white", ec=RULE, lw=0.7)
-for txt, xy, ft in [("cold front\nsouth-southwest", (-330, -470), "COLD"),
-                    ("warm front\neast-southeast", (620, -140), "WARM"),
-                    ("occlusion, low to\ntriple point", (300, -330), "OCFNT"),
-                    ("stationary\neast-northeast", (500, 330), "STNRY")]:
-    ax.text(*xy, txt, color=C[ft], fontsize=8.5, fontweight="semibold", ha="center",
-            va="center", bbox=box, zorder=12)
-ax.set_xlabel("km east of the low", fontsize=8, color=MUTED)
-ax.set_ylabel("km north of the low", fontsize=8, color=MUTED)
-save(fig, "hb_composite.png")
-
+# The lifecycle composite (hb_composite.png) is drawn by composite_render.py.
 fig, axes = plt.subplots(1, 3, figsize=(12.6, 4.5), gridspec_kw={"wspace": 0.12})
 for ax, s, lab in zip(axes, ["isolated", "primary", "secondary"],
                       ["No other low within 750 km", "Deepest low within 750 km",
@@ -275,132 +247,15 @@ save(fig, "hb_neighbours.png")
 # ============================================================== 9. real cases
 
 
-PIPPED = ("COLD", "WARM", "OCFNT", "STNRY", "DRYLN")
-# Where motion is too small to say, pips follow the usual convention: cold
-# toward the east-southeast, warm toward the north, occluded toward the
-# east-northeast, stationary triangles toward the (warm) south, dryline
-# scallops toward the moist east. Compass bearings, degrees clockwise from north.
-CONVENTION = {"COLD": 115, "WARM": 10, "OCFNT": 70, "STNRY": 180, "DRYLN": 90}
-MOVED_KM = 15.0          # net 3-hour motion needed before trusting it
-
-
-def neighbour_maps(t):
-    """Fronts on the analyses three hours before and after t, keyed by offset."""
-    import pyarrow.dataset as pads
-    from common import POINTS
-    dset = pads.dataset(POINTS, format="parquet", partitioning="hive")
-    tab = dset.to_table(columns=["valid_time", "ftype", "lat_e2", "lon_e2"],
-                        filter=pads.field("year") == t.year).to_pandas()
-    vt = pd.to_datetime(tab.valid_time)
-    vt = vt.dt.tz_localize(None) if vt.dt.tz is not None else vt
-    t0 = pd.Timestamp(t).tz_localize(None) if pd.Timestamp(t).tzinfo else pd.Timestamp(t)
-    out = {}
-    for h in (-3, 3):
-        sub = tab[vt == t0 + pd.Timedelta(hours=h)]
-        lines = {}
-        for la, lo, ft in zip(sub.lat_e2, sub.lon_e2, sub.ftype):
-            x, y = FWD.transform(np.asarray(lo) / 100.0, np.asarray(la) / 100.0)
-            if len(x) > 1:
-                lines.setdefault(str(ft), []).append(fs.densify(x, y, 20_000.0))
-        out[h] = lines
-    return out
-
-
-def pip_side(x, y, lat, lon, ft, nb, tally):
-    """Which side of the line the pips go on, and whether motion decided it."""
-    if ft in ("COLD", "WARM"):
-        m = [fs.normal_motion(x, y, nb[3].get(ft), 300_000.0),
-             fs.normal_motion(x, y, nb[-3].get(ft), 300_000.0)]
-        moved = [v for v in (m[0], None if m[1] is None else -m[1]) if v is not None]
-        if moved and abs(np.mean(moved)) > MOVED_KM * 1000:
-            side = 1 if np.mean(moved) > 0 else -1
-            tally["motion"] += 1
-            tally["agree"] += side == conventional_side(x, y, lat, lon, ft)
-            return side
-    tally["convention"] += 1
-    return conventional_side(x, y, lat, lon, ft)
-
-
-def conventional_side(x, y, lat, lon, ft):
-    k = len(lat) // 2
-    br = np.radians(CONVENTION[ft])
-    e = np.subtract(FWD.transform(lon[k] + 0.5, lat[k]), FWD.transform(lon[k], lat[k]))
-    n = np.subtract(FWD.transform(lon[k], lat[k] + 0.5), FWD.transform(lon[k], lat[k]))
-    e, n = e / np.hypot(*e), n / np.hypot(*n)
-    v = np.sin(br) * e + np.cos(br) * n
-    return fs.side_toward(x, y, v[0], v[1])
-
-
-JOIN_M = 120_000.0       # an occlusion end this close to a front end is a triple point
-
-
-def occlusion_side(x, y, joined):
-    """Pips on the same side as the warm (else cold) front they continue into.
-
-    Walking from the low along the occlusion, through the triple point and on
-    along the warm or cold front, the pips stay on one side. Occlusions are
-    not placed by their own motion: between maps they lengthen and wrap round
-    the low, which reads as sideways motion that is not there.
-    """
-    for want in ("WARM", "COLD"):
-        for fx_, fy_, fside, fft in joined:
-            if fft != want:
-                continue
-            for oe in (0, -1):
-                for fe in (0, -1):
-                    if np.hypot(x[oe] - fx_[fe], y[oe] - fy_[fe]) < JOIN_M:
-                        # occlusion in low-to-junction order ends at oe; the
-                        # partner runs away from the junction starting at fe
-                        s_partner = fside if fe == 0 else -fside
-                        return s_partner if oe == -1 else -s_partner
-    return None
-
-
-def draw_line(ax, lat, lon, ft, nb=None, tally=None, joined=None):
-    x, y = FWD.transform(lon, lat)
-    if ft in PIPPED:
-        side = occlusion_side(x, y, joined) if ft == "OCFNT" and joined else None
-        if side is not None:
-            tally["joined"] += 1
-        else:
-            side = pip_side(x, y, lat, lon, ft, nb, tally)
-        if joined is not None and ft in ("COLD", "WARM"):
-            joined.append((x, y, side, ft))
-        fs.draw_front(ax, x, y, ft, side=side, unit=1000.0, lw=1.8,
-                      spacing_km=150.0, size_km=62.0)
-        return
-    style = {"TROF": dict(color=C["TROF"], lw=1.5, ls=(0, (5, 3))),
-             "SQLN": dict(color=C["SQLN"], lw=1.6, ls=(0, (6, 2, 1, 2, 1, 2))),
-             "TRPWV": dict(color=C["TRPWV"], lw=1.2)}.get(ft)
-    if style:
-        ax.plot(x, y, zorder=6, solid_capstyle="round", **style)
-
-
 fig, axes = plt.subplots(2, 2, figsize=(11, 10.4), gridspec_kw={"hspace": 0.12, "wspace": 0.04})
 R = 1700_000.0
 for ax, case in zip(axes.ravel(), D["cases"]):
     cx, cy = FWD.transform(case["lon"], case["lat"])
     ext = (cx - R, cx + R, cy - R * 0.9, cy + R * 0.9)
     mapax(ax, extent=ext, lw=0.8)
-    nb, tally = neighbour_maps(case["time"]), {"motion": 0, "agree": 0, "convention": 0, "joined": 0}
-    fr, joined = case["fronts"], []
-    # cold and warm fronts first, so occlusions can take their side from them
-    order = sorted(range(len(fr)), key=lambda i: str(fr.ftype.iloc[i]) == "OCFNT")
-    for i in order:
-        la, lo, ft = fr.lat_e2.iloc[i], fr.lon_e2.iloc[i], str(fr.ftype.iloc[i])
-        draw_line(ax, np.asarray(la) / 100.0, np.asarray(lo) / 100.0, ft, nb, tally, joined)
-    print(f"{case['time']:%Y-%m-%d} pips: {tally}, neighbour maps: "
-          f"{[len(sum(nb[h].values(), [])) for h in (-3, 3)]} lines")
-    for _, c in case["centres"].iterrows():
-        x, y = FWD.transform(c.lon, c.lat)
-        if not (ext[0] < x < ext[1] and ext[2] < y < ext[3]):
-            continue
-        col = C["LOW"] if c.kind == "L" else C["HIGH"]
-        ax.text(x, y, c.kind, color=col, fontsize=13, fontweight="bold", ha="center",
-                va="center", zorder=8)
-        ax.text(x, y - 110_000, f"{c.pressure_hpa:.0f}", color=col, fontsize=7.5,
-                ha="center", va="top", zorder=8,
-                bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.8))
+    tally = cf.draw_chart(ax, case["fronts"], case["time"])
+    print(f"{case['time']:%Y-%m-%d} pips: {tally}")
+    cf.draw_centres(ax, case["centres"], ext)
     ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3])
     ptitle(ax, f"{case['time']:%d %b %Y}  12Z   \u00b7   {case['p']:.0f} hPa low")
 h = [Line2D([], [], color=C["COLD"], lw=2.2, label="Cold"),

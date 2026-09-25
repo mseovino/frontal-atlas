@@ -21,7 +21,8 @@ Manual's regional description -- warm occlusions on the east sides of ocean
 basins and in the lee of the Divide, cold ones on the west sides of basins --
 is the check on whether that classification means anything.
 
-Writes outputs/composite_stages.npz and outputs/occlusion_types.parquet.
+Writes outputs/composite_stages.npz, outputs/occlusion_types.parquet and
+outputs/low_stages.parquet (each low's stage, for picking real examples).
 """
 import numpy as np
 import pandas as pd
@@ -56,6 +57,7 @@ STRATA = ["open", "attached", "attached_deepening", "attached_filling", "wrapped
 hist = {s: {f: np.zeros((NB, NB)) for f in FRONTS} for s in STRATA}
 n_low = {s: 0 for s in STRATA}
 types_rows = []
+stage_rows = []
 dset = pads.dataset(POINTS, format="parquet", partitioning="hive")
 
 
@@ -184,6 +186,12 @@ for year in YEARS:
     }
     for s in STRATA:
         n_low[s] += int(masks[s].sum())
+    label = np.select([masks["open"], masks["attached_deepening"], masks["attached_filling"],
+                       masks["attached"], masks["wrapped"], masks["triple"]],
+                      ["open", "attached_deepening", "attached_filling", "attached", "wrapped", "triple"],
+                      "neither")
+    stage_rows.append(ly[["track_id", "t", "lat", "lon", "x", "y", "pressure_hpa", "dp12"]]
+                      .assign(stage=label))
 
     keys = pd.Series(np.arange(len(ly))).groupby(lt).apply(np.array).to_dict()
     for ft in FRONTS:
@@ -222,6 +230,7 @@ np.savez_compressed(OUT / "composite_stages.npz",
                     bin_km=BIN_KM, reach_km=REACH_KM)
 ty = pd.DataFrame(types_rows, columns=["t", "lat", "lon", "kind", "angle_cold", "angle_warm", "occl_km"])
 ty.to_parquet(OUT / "occlusion_types.parquet")
+pd.concat(stage_rows, ignore_index=True).to_parquet(OUT / "low_stages.parquet")
 
 print("\nlows per stage: " + "  ".join(f"{s} {n_low[s]:,}" for s in STRATA))
 print(f"\n{len(ty):,} triple points typed: {100 * (ty.kind == 'cold').mean():.0f}% cold-type, "

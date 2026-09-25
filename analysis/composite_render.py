@@ -353,4 +353,4 @@ if __name__ == "__main__":
     OUTLINES, FADE = False, 0.55
     panels(st, [("open", "Open wave"), ("attached_deepening", "Occluding, still deepening"),
                 ("attached_filling", "Occluded, filling"), ("wrapped", "Occlusion wrapped, not attached")],
-           "hb_composite_analysis.png", analysis=True)
+           "trial_composite_analysis.png", analysis=True)   # trial only; looked worse than plain steps
