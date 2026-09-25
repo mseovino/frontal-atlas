@@ -18,7 +18,7 @@ import numpy as np
 import matplotlib as mpl
 from matplotlib.colors import to_rgb
 from matplotlib.patches import Patch
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, zoom
 from common import OUT, REPO, plt
 
 INK, MUTED, RULE = "#15202B", "#566374", "#C9D2DC"
@@ -26,6 +26,9 @@ C = {"COLD": "#1F4FB4", "WARM": "#C8281F", "OCFNT": "#7A2F9E", "STNRY": "#2F7A4A
 NAME = {"COLD": "Cold", "WARM": "Warm", "OCFNT": "Occluded", "STNRY": "Stationary"}
 FRONTS = ["COLD", "WARM", "OCFNT", "STNRY"]
 SHARPEN = 3.0        # share ** SHARPEN before mixing colours
+STYLE = "steps"      # "steps" (three levels) or "smooth" (continuous blend)
+STEPS = [0.2, 0.45, 0.75]        # fractions of the shared scale: sometimes / often / most often
+TINTS = [0.28, 0.58, 1.0]        # how much of the type colour each step shows
 DISP = 950.0
 mpl.rcParams.update({"font.family": "Segoe UI", "font.size": 9, "text.color": INK,
                      "axes.edgecolor": RULE, "xtick.color": MUTED, "ytick.color": MUTED,
@@ -71,6 +74,26 @@ class Composite:
         white = np.ones_like(rgb)
         return rgb * a[..., None] + white * (1 - a[..., None]), vmax
 
+    def image_steps(self, s, vmax):
+        """Three steps of how much front is drawn, each in the leading type's colour.
+
+        Steps are fractions of the shared scale; blending colours inside a step
+        would only make muddy bands, so each point takes its leading type.
+        """
+        # Interpolate onto a 4x finer grid first, so step edges are smooth
+        # curves rather than 25 km staircases.
+        F = {f: zoom(a, 4, order=1) for f, a in self.fields(s).items()}
+        total = sum(F.values())
+        lead = np.argmax(np.stack([F[f] for f in FRONTS]), axis=0)
+        level = np.digitize(total / vmax, STEPS)                       # 0 = below the first step
+        rgb = np.ones(total.shape + (3,))
+        for k, f in enumerate(FRONTS):
+            base = np.array(to_rgb(C[f]))
+            for lv, tint in enumerate(TINTS, start=1):
+                m = (lead == k) & (level == lv)
+                rgb[m] = base * tint + (1 - tint)
+        return rgb, total
+
     def scale(self, s):
         # Fade scaled to the ring 150-900 km out, not the spike at the centre,
         # which every stage has because fronts are drawn touching the low.
@@ -78,9 +101,16 @@ class Composite:
         return np.percentile(total[(self.rad >= 150) & (self.rad <= 900)], 97)
 
     def draw(self, ax, s, vmax=None, labels=True):
-        img, vmax = self.image(s, vmax)
+        if STYLE == "steps":
+            vmax = vmax or self.scale(s)
+            img, total = self.image_steps(s, vmax)
+        else:
+            img, vmax = self.image(s, vmax)
         ax.imshow(img, origin="lower", extent=(-self.reach, self.reach, -self.reach, self.reach),
-                  interpolation="bilinear", zorder=1)
+                  interpolation="nearest" if STYLE == "steps" else "bilinear", zorder=1)
+        if STYLE == "steps":
+            ext = np.linspace(-self.reach + self.bin / 2, self.reach - self.bin / 2, total.shape[0])
+            ax.contour(ext, ext, total / vmax, levels=STEPS, colors="white", linewidths=0.6, zorder=2)
         th = np.linspace(0, 2 * np.pi, 361)
         for r in (250, 500, 750):
             ax.plot(r * np.cos(th), r * np.sin(th), color="#9AA5B1", lw=0.6, ls=(0, (3, 3)), zorder=3)
@@ -98,7 +128,12 @@ class Composite:
 
 def legend(fig_or_ax, **kw):
     h = [Patch(facecolor=C[f], label=NAME[f]) for f in FRONTS]
-    fig_or_ax.legend(handles=h, fontsize=8, framealpha=0.96, edgecolor=RULE, **kw)
+    if STYLE == "steps":
+        grey = np.array(to_rgb("#4A5563"))
+        h += [Patch(facecolor="none", edgecolor="none", label="")]
+        h += [Patch(facecolor=grey * t + (1 - t), edgecolor=RULE, label=lab)
+              for t, lab in zip(TINTS, ["sometimes drawn", "often", "most often"])]
+    fig_or_ax.legend(handles=h, fontsize=7.5, framealpha=0.96, edgecolor=RULE, **kw)
 
 
 def panels(comp, specs, name, ncols=2, dest=(OUT,)):
