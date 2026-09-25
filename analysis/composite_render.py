@@ -29,6 +29,8 @@ SHARPEN = 3.0        # share ** SHARPEN before mixing colours
 STYLE = "steps"      # "steps" (three levels) or "smooth" (continuous blend)
 STEPS = [0.2, 0.45, 0.75]        # fractions of the shared scale: sometimes / often / most often
 TINTS = [0.28, 0.58, 1.0]        # how much of the type colour each step shows
+OUTLINES = False                 # outline each type's own extent on top of the fills
+OUTLINE_AT = 0.2                 # outline level, as a fraction of the shared scale
 DISP = 950.0
 mpl.rcParams.update({"font.family": "Segoe UI", "font.size": 9, "text.color": INK,
                      "axes.edgecolor": RULE, "xtick.color": MUTED, "ytick.color": MUTED,
@@ -92,6 +94,7 @@ class Composite:
             for lv, tint in enumerate(TINTS, start=1):
                 m = (lead == k) & (level == lv)
                 rgb[m] = base * tint + (1 - tint)
+        self._last_fields = F
         return rgb, total
 
     def scale(self, s):
@@ -111,6 +114,12 @@ class Composite:
         if STYLE == "steps":
             ext = np.linspace(-self.reach + self.bin / 2, self.reach - self.bin / 2, total.shape[0])
             ax.contour(ext, ext, total / vmax, levels=STEPS, colors="white", linewidths=0.6, zorder=2)
+            if OUTLINES:
+                # Each type's own extent as a thin outline, so a type that is
+                # second at a point still shows where it runs under the leader.
+                for f in FRONTS:
+                    ax.contour(ext, ext, self._last_fields[f] / vmax, levels=[OUTLINE_AT],
+                               colors=[C[f]], linewidths=1.1, zorder=3)
         th = np.linspace(0, 2 * np.pi, 361)
         for r in (250, 500, 750):
             ax.plot(r * np.cos(th), r * np.sin(th), color="#9AA5B1", lw=0.6, ls=(0, (3, 3)), zorder=3)
@@ -171,3 +180,7 @@ if __name__ == "__main__":
     fi = Composite(OUT / "composite_final.npz")
     panels(fi, [("n_occl", "Occluded parent lows"), ("n_triple", "Triple-point lows")],
            "hb_composite_triple.png", dest=(OUT, HB))
+    OUTLINES = True   # trial only; the handbook uses the plain steps
+    panels(st, [("open", "Open wave"), ("attached_deepening", "Occluding, still deepening"),
+                ("attached_filling", "Occluded, filling"), ("wrapped", "Occlusion wrapped, not attached")],
+           "trial_composite_outlines.png")
