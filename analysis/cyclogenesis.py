@@ -21,12 +21,14 @@ from common import OUT, REPO, basemap, box_extent, g, plt
 COOL = [10, 11, 12, 1, 2, 3, 4]
 MIN_H, MIN_PATH, MIN_RATIO = 24.0, 500.0, 0.6       # the paper's filters
 CONT_KM, CONT_H = 400.0, 9.0
-# Genesis box kept inside the coverage of the analysed lows. The east edge of
-# the bulletin is 30W and the north edge about 82N. In the west the density of
-# analysed lows triples between 155W and 150W; whether that is Gulf of Alaska
-# cyclogenesis or a change in coverage cannot be told from this archive, so
-# the box stops at 140W, the same caution as the paper's 30-gridpoint buffer.
-BOX = (25.0, 72.0, -140.0, -45.0)
+# Genesis box: WPC's own analysis area where genesis can be trusted -- the
+# Lower 48, southern Canada including Alberta, and the waters just off the
+# East Coast. Over the open oceans a low that drops off an intermediate map
+# and returns on the next synoptic one (when the ocean analysis came from OPC)
+# looks like a new cyclone: offshore Pacific "genesis" near 137W occurred on
+# synoptic maps 79% of the time, against 50% expected, and Labrador lows were
+# already 992 hPa when first drawn. See cyclogenesis_check.py.
+BOX = (25.0, 60.0, -125.0, -62.0)
 CELL = 150.0
 SMOOTH = 1                                           # 3x3 mean, as in the paper
 PEAK_Q, HALF = 90.0, 0.5                             # peaks above this percentile; zone = cells >= HALF x peak
@@ -132,7 +134,7 @@ np.savez_compressed(OUT / "cyclogenesis.npz", per_season=per_season, smooth=sm, 
 gen.to_parquet(OUT / "cyclogenesis_events.parquet")
 
 # ----------------------------------------------------------------- figure
-ext = box_extent(-165, -40, 22, 75, cell_km=CELL, pad_km=100)
+ext = box_extent(-128, -58, 23, 60, cell_km=CELL, pad_km=100)
 fig, ax, grid_, fwd, ext = basemap(ext, cell_km=CELL, figsize=(10.5, 8.2), anchors=True)
 full = (grid.x_min, grid.x_max, grid.y_min, grid.y_max)
 im = ax.imshow(np.where(sm > 0, sm, np.nan), origin="lower", extent=full, cmap="YlOrRd",
@@ -145,6 +147,6 @@ ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3])
 ax.legend(loc="lower left", fontsize=8)
 fig.colorbar(im, ax=ax, shrink=0.7, label=f"genesis per {CELL:g} km cell per cool season (3x3 mean)")
 ax.set_title("Cool-season cyclogenesis from analysed lows, Oct-Apr 2009/10-2017/18\n"
-             "Fritzen et al. (2021) filters; outlined: genesis zones")
+             "WPC analysis area only; Fritzen et al. (2021) filters; outlined: genesis zones")
 fig.savefig(OUT / "cyclogenesis_zones.png", dpi=140, bbox_inches="tight")
 print("wrote cyclogenesis_zones.png")

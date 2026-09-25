@@ -131,7 +131,7 @@ as `python analysis/<name>.py`. Generated figures, grids and pickles go to
 | `hour_domain.py`, `manual_checks.py` | Synoptic versus intermediate hours: coverage, and the per-type effect counted by feature centroid |
 | `stage_detection.py` | Why weakening fronts are tagged three times as often as developing ones |
 | `trend_drawn_length.py`, `trend_breakpoint.py`, `trough_trend_map.py` | How much is drawn per map over time, and when the trough increase happened |
-| `cyclogenesis.py` | Cool-season genesis zones and bomb cyclones from analysed lows, following Fritzen et al. (2021, JAMC) |
+| `cyclogenesis.py`, `cyclogenesis_check.py` | Cool-season genesis zones and bomb cyclones from analysed lows in WPC's area, following Fritzen et al. (2021, JAMC); the check tests whether each zone deepens like real genesis |
 | `consistency_monitor.py` | Monthly drawing-consistency check: drawn length, piece length, hour ratios and stage use, flagged against both the recent past and a fixed reference period |
 | `expect_data.py`, `expect_page.py` | Month-by-month maps and seasonal central-pressure ranges for the training page |
 
