@@ -23,6 +23,7 @@ from matplotlib.patches import Patch
 from matplotlib.ticker import FuncFormatter
 from scipy.ndimage import gaussian_filter
 from common import OUT, ARGS, NO_ANCHORS, REPO, B, box_extent, fx, g, plt
+import front_symbols as fs
 
 # Handbook figures go beside the (private) handbook source that embeds them.
 IMG = REPO / "private" / "handbook" / "img"
@@ -274,23 +275,101 @@ save(fig, "hb_neighbours.png")
 # ============================================================== 9. real cases
 
 
-def draw_line(ax, lat, lon, ft):
+PIPPED = ("COLD", "WARM", "OCFNT", "STNRY", "DRYLN")
+# Where motion is too small to say, pips follow the usual convention: cold
+# toward the east-southeast, warm toward the north, occluded toward the
+# east-northeast, stationary triangles toward the (warm) south, dryline
+# scallops toward the moist east. Compass bearings, degrees clockwise from north.
+CONVENTION = {"COLD": 115, "WARM": 10, "OCFNT": 70, "STNRY": 180, "DRYLN": 90}
+MOVED_KM = 15.0          # net 3-hour motion needed before trusting it
+
+
+def neighbour_maps(t):
+    """Fronts on the analyses three hours before and after t, keyed by offset."""
+    import pyarrow.dataset as pads
+    from common import POINTS
+    dset = pads.dataset(POINTS, format="parquet", partitioning="hive")
+    tab = dset.to_table(columns=["valid_time", "ftype", "lat_e2", "lon_e2"],
+                        filter=pads.field("year") == t.year).to_pandas()
+    vt = pd.to_datetime(tab.valid_time)
+    vt = vt.dt.tz_localize(None) if vt.dt.tz is not None else vt
+    t0 = pd.Timestamp(t).tz_localize(None) if pd.Timestamp(t).tzinfo else pd.Timestamp(t)
+    out = {}
+    for h in (-3, 3):
+        sub = tab[vt == t0 + pd.Timedelta(hours=h)]
+        lines = {}
+        for la, lo, ft in zip(sub.lat_e2, sub.lon_e2, sub.ftype):
+            x, y = FWD.transform(np.asarray(lo) / 100.0, np.asarray(la) / 100.0)
+            if len(x) > 1:
+                lines.setdefault(str(ft), []).append(fs.densify(x, y, 20_000.0))
+        out[h] = lines
+    return out
+
+
+def pip_side(x, y, lat, lon, ft, nb, tally):
+    """Which side of the line the pips go on, and whether motion decided it."""
+    if ft in ("COLD", "WARM"):
+        m = [fs.normal_motion(x, y, nb[3].get(ft), 300_000.0),
+             fs.normal_motion(x, y, nb[-3].get(ft), 300_000.0)]
+        moved = [v for v in (m[0], None if m[1] is None else -m[1]) if v is not None]
+        if moved and abs(np.mean(moved)) > MOVED_KM * 1000:
+            side = 1 if np.mean(moved) > 0 else -1
+            tally["motion"] += 1
+            tally["agree"] += side == conventional_side(x, y, lat, lon, ft)
+            return side
+    tally["convention"] += 1
+    return conventional_side(x, y, lat, lon, ft)
+
+
+def conventional_side(x, y, lat, lon, ft):
+    k = len(lat) // 2
+    br = np.radians(CONVENTION[ft])
+    e = np.subtract(FWD.transform(lon[k] + 0.5, lat[k]), FWD.transform(lon[k], lat[k]))
+    n = np.subtract(FWD.transform(lon[k], lat[k] + 0.5), FWD.transform(lon[k], lat[k]))
+    e, n = e / np.hypot(*e), n / np.hypot(*n)
+    v = np.sin(br) * e + np.cos(br) * n
+    return fs.side_toward(x, y, v[0], v[1])
+
+
+JOIN_M = 120_000.0       # an occlusion end this close to a front end is a triple point
+
+
+def occlusion_side(x, y, joined):
+    """Pips on the same side as the warm (else cold) front they continue into.
+
+    Walking from the low along the occlusion, through the triple point and on
+    along the warm or cold front, the pips stay on one side. Occlusions are
+    not placed by their own motion: between maps they lengthen and wrap round
+    the low, which reads as sideways motion that is not there.
+    """
+    for want in ("WARM", "COLD"):
+        for fx_, fy_, fside, fft in joined:
+            if fft != want:
+                continue
+            for oe in (0, -1):
+                for fe in (0, -1):
+                    if np.hypot(x[oe] - fx_[fe], y[oe] - fy_[fe]) < JOIN_M:
+                        # occlusion in low-to-junction order ends at oe; the
+                        # partner runs away from the junction starting at fe
+                        s_partner = fside if fe == 0 else -fside
+                        return s_partner if oe == -1 else -s_partner
+    return None
+
+
+def draw_line(ax, lat, lon, ft, nb=None, tally=None, joined=None):
     x, y = FWD.transform(lon, lat)
-    if ft == "STNRY":
-        d = np.concatenate([[0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
-        if d[-1] <= 0:
-            return
-        step = 110_000.0
-        s = np.arange(0, d[-1] + step, step)
-        xs, ys = np.interp(np.append(s, d[-1]), d, x), np.interp(np.append(s, d[-1]), d, y)
-        for k in range(len(xs) - 1):
-            ax.plot(xs[k:k + 2], ys[k:k + 2], color=C["COLD"] if k % 2 == 0 else C["WARM"],
-                    lw=2.0, solid_capstyle="butt", zorder=6)
+    if ft in PIPPED:
+        side = occlusion_side(x, y, joined) if ft == "OCFNT" and joined else None
+        if side is not None:
+            tally["joined"] += 1
+        else:
+            side = pip_side(x, y, lat, lon, ft, nb, tally)
+        if joined is not None and ft in ("COLD", "WARM"):
+            joined.append((x, y, side, ft))
+        fs.draw_front(ax, x, y, ft, side=side, unit=1000.0, lw=1.8,
+                      spacing_km=150.0, size_km=62.0)
         return
-    style = {"COLD": dict(color=C["COLD"], lw=2.0), "WARM": dict(color=C["WARM"], lw=2.0),
-             "OCFNT": dict(color=C["OCFNT"], lw=2.0),
-             "TROF": dict(color=C["TROF"], lw=1.5, ls=(0, (5, 3))),
-             "DRYLN": dict(color=C["DRYLN"], lw=1.6, ls=(0, (1, 1.6))),
+    style = {"TROF": dict(color=C["TROF"], lw=1.5, ls=(0, (5, 3))),
              "SQLN": dict(color=C["SQLN"], lw=1.6, ls=(0, (6, 2, 1, 2, 1, 2))),
              "TRPWV": dict(color=C["TRPWV"], lw=1.2)}.get(ft)
     if style:
@@ -303,8 +382,15 @@ for ax, case in zip(axes.ravel(), D["cases"]):
     cx, cy = FWD.transform(case["lon"], case["lat"])
     ext = (cx - R, cx + R, cy - R * 0.9, cy + R * 0.9)
     mapax(ax, extent=ext, lw=0.8)
-    for la, lo, ft in zip(case["fronts"].lat_e2, case["fronts"].lon_e2, case["fronts"].ftype):
-        draw_line(ax, np.asarray(la) / 100.0, np.asarray(lo) / 100.0, str(ft))
+    nb, tally = neighbour_maps(case["time"]), {"motion": 0, "agree": 0, "convention": 0, "joined": 0}
+    fr, joined = case["fronts"], []
+    # cold and warm fronts first, so occlusions can take their side from them
+    order = sorted(range(len(fr)), key=lambda i: str(fr.ftype.iloc[i]) == "OCFNT")
+    for i in order:
+        la, lo, ft = fr.lat_e2.iloc[i], fr.lon_e2.iloc[i], str(fr.ftype.iloc[i])
+        draw_line(ax, np.asarray(la) / 100.0, np.asarray(lo) / 100.0, ft, nb, tally, joined)
+    print(f"{case['time']:%Y-%m-%d} pips: {tally}, neighbour maps: "
+          f"{[len(sum(nb[h].values(), [])) for h in (-3, 3)]} lines")
     for _, c in case["centres"].iterrows():
         x, y = FWD.transform(c.lon, c.lat)
         if not (ext[0] < x < ext[1] and ext[2] < y < ext[3]):
@@ -322,7 +408,7 @@ h = [Line2D([], [], color=C["COLD"], lw=2.2, label="Cold"),
      Line2D([], [], color=C["OCFNT"], lw=2.2, label="Occluded"),
      Line2D([], [], color=C["COLD"], lw=2.2, ls=(0, (4, 4)), gapcolor=C["WARM"], label="Stationary"),
      Line2D([], [], color=C["TROF"], lw=1.6, ls=(0, (5, 3)), label="Trough"),
-     Line2D([], [], color=C["DRYLN"], lw=1.6, ls=(0, (1, 1.6)), label="Dryline"),
+     Line2D([], [], color=C["DRYLN"], lw=1.8, label="Dryline"),
      Line2D([], [], color=C["SQLN"], lw=1.6, ls=(0, (6, 2, 1, 2, 1, 2)), label="Squall line")]
 fig.legend(handles=h, loc="lower center", ncol=7, fontsize=8.5, frameon=False,
            bbox_to_anchor=(0.5, 0.03))
