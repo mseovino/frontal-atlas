@@ -11,12 +11,23 @@ because a low was skipped for a map or two and the tracker could not bridge
 the gap; those are counted below as likely continuations (a track that ended
 within CONT_KM and CONT_H of the new start) and reported separately.
 
-Writes outputs/cyclogenesis.npz and outputs/cyclogenesis_*.png.
+Pass --deepen N to keep only lows that eventually deepen at least N hPa below
+their first analysed pressure. The paper's movement filters were built for
+model pressure minima; on the analysis they also pass weak lee-trough lows
+that analysts place along the Rockies and that drift east without developing.
+
+Writes outputs/cyclogenesis[_deepN].npz and matching figure and events files.
 """
+import argparse
 import numpy as np
 import pandas as pd
 from scipy import ndimage
 from common import OUT, REPO, basemap, box_extent, g, plt
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--deepen", type=float, default=0.0, help="minimum deepening after genesis, hPa")
+DEEPEN = ap.parse_args().deepen
+TAG = f"_deep{DEEPEN:g}" if DEEPEN else ""
 
 COOL = [10, 11, 12, 1, 2, 3, 4]
 MIN_H, MIN_PATH, MIN_RATIO = 24.0, 500.0, 0.6       # the paper's filters
@@ -63,6 +74,12 @@ for i, (tid, t0, la, lo) in enumerate(zip(etc.track_id, etc.genesis_time, etc.ge
 etc["continuation"] = cont
 print(f"likely continuations of an earlier track: {cont.mean():.0%}")
 gen = etc[~etc.continuation].copy()
+if DEEPEN:
+    first_p = tr.sort_values("valid_time").groupby("track_id").pressure_hpa.first()
+    gen["p0"] = gen.track_id.map(first_p)
+    keep = gen.min_pressure_hpa <= gen.p0 - DEEPEN
+    print(f"deepening >= {DEEPEN:g} hPa after first analysis: {keep.mean():.0%} of genesis events kept")
+    gen = gen[keep].copy()
 print(f"{len(gen):,} genesis events kept ({len(gen) / n_seasons:.0f} per season)")
 
 # ----------------------------------------------------------------- bombs
@@ -120,18 +137,19 @@ zones = zones.join(zs, on="zone")
 zones["per_season"] = zones.n / n_seasons
 zones["per_1e5km2"] = zones.per_season / (zones.cells * CELL ** 2 / 1e5)
 zones = zones.sort_values("per_season", ascending=False)
+zones["name"] = zones.zone.astype(str)
 print(f"\n{nz} zones: local maxima above the {PEAK_Q:g}th percentile, each grown to {HALF:g} of its peak "
       f"({thr:.2f} per {CELL:g} km cell per season)")
-print(f"{'lat':>6s}{'lon':>8s}{'cells':>7s}{'per season':>12s}{'per 1e5 km2':>13s}{'bombs':>7s}{'median min p':>14s}")
+print(f"{"#":>3s}{"lat":>6s}{"lon":>8s}{"cells":>7s}{'per season':>12s}{'per 1e5 km2':>13s}{'bombs':>7s}{'median min p':>14s}")
 for _, z in zones.iterrows():
-    print(f"{z.lat:6.1f}{z.lon:8.1f}{z.cells:7d}{z.per_season:12.1f}{z.per_1e5km2:13.2f}"
+    print(f"{z.zone:3d}{z.lat:6.1f}{z.lon:8.1f}{z.cells:7d}{z.per_season:12.1f}{z.per_1e5km2:13.2f}"
           f"{int(z.bombs):7d}{z.min_p:14.0f}")
 print(f"\noutside all zones: {100 * (gen.zone == 0).mean():.0f}% of genesis events "
       f"(the paper: 70% 'other')")
 
-np.savez_compressed(OUT / "cyclogenesis.npz", per_season=per_season, smooth=sm, labels=lab,
+np.savez_compressed(OUT / f"cyclogenesis{TAG}.npz", per_season=per_season, smooth=sm, labels=lab,
                     n_seasons=n_seasons)
-gen.to_parquet(OUT / "cyclogenesis_events.parquet")
+gen.to_parquet(OUT / f"cyclogenesis_events{TAG}.parquet")
 
 # ----------------------------------------------------------------- figure
 ext = box_extent(-128, -58, 23, 60, cell_km=CELL, pad_km=100)
@@ -139,14 +157,22 @@ fig, ax, grid_, fwd, ext = basemap(ext, cell_km=CELL, figsize=(10.5, 8.2), ancho
 full = (grid.x_min, grid.x_max, grid.y_min, grid.y_max)
 im = ax.imshow(np.where(sm > 0, sm, np.nan), origin="lower", extent=full, cmap="YlOrRd",
                vmin=0, vmax=np.percentile(sm[sm > 0], 99.5), interpolation="bilinear", zorder=1)
-ax.contour(np.linspace(full[0], full[1], grid.nx), np.linspace(full[2], full[3], grid.ny),
-           (lab > 0).astype(float), levels=[0.5], colors="#15202B", linewidths=1.3, zorder=5)
+# One outline per zone, so neighbouring zones stay visibly separate.
+xs = np.linspace(full[0], full[1], grid.nx); ys = np.linspace(full[2], full[3], grid.ny)
+for k in range(1, nz + 1):
+    ax.contour(xs, ys, (lab == k).astype(float), levels=[0.5], colors="#15202B",
+               linewidths=1.3, zorder=5)
+    rr, cc = np.argwhere(lab == k).mean(axis=0)
+    ax.text(xs[int(round(cc))], ys[int(round(rr))], str(k), fontsize=9, fontweight="bold", color="#15202B",
+            ha="center", va="center", zorder=7,
+            bbox=dict(boxstyle="circle,pad=0.2", fc="white", ec="#15202B", lw=0.8))
 bx, by = fwd.transform(gen.genesis_lon[gen.bomb].to_numpy(), gen.genesis_lat[gen.bomb].to_numpy())
 ax.scatter(bx, by, s=7, color="#1F4FB4", zorder=6, label="bomb cyclone genesis")
 ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3])
 ax.legend(loc="lower left", fontsize=8)
 fig.colorbar(im, ax=ax, shrink=0.7, label=f"genesis per {CELL:g} km cell per cool season (3x3 mean)")
 ax.set_title("Cool-season cyclogenesis from analysed lows, Oct-Apr 2009/10-2017/18\n"
-             "WPC analysis area only; Fritzen et al. (2021) filters; outlined: genesis zones")
-fig.savefig(OUT / "cyclogenesis_zones.png", dpi=140, bbox_inches="tight")
-print("wrote cyclogenesis_zones.png")
+             "WPC analysis area only; Fritzen et al. (2021) filters"
+             + (f"; lows deepening {DEEPEN:g}+ hPa after first analysis" if DEEPEN else ""))
+fig.savefig(OUT / f"cyclogenesis_zones{TAG}.png", dpi=140, bbox_inches="tight")
+print(f"wrote cyclogenesis_zones{TAG}.png")
