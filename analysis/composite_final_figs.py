@@ -120,14 +120,14 @@ for f in FRONTS:
             color=C[f], fontsize=8.5, fontweight="semibold", ha="center", va="center", bbox=box, zorder=12)
 ax.set_xlabel("km along the direction of travel", fontsize=8, color=MUTED)
 ax.set_ylabel("km to the left of travel", fontsize=8, color=MUTED)
-save(fig, "hb_composite.png")
+save(fig, "rot_composite.png")
 
 # ------------------------------------------------------- what rotation buys
 fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.4), gridspec_kw={"wspace": 0.12})
 draw(axes[0], "north", arrow=False); axes[0].set_title("Grid north up", loc="left", fontweight="semibold")
 draw(axes[1], "rot", labels=False); axes[1].set_title("Rotated so every low travels to the right", loc="left", fontweight="semibold")
 legend(axes[0])
-save(fig, "hb_composite_rotation.png")
+save(fig, "rot_composite_rotation.png")
 
 # ------------------------------------------------------------- by depth
 fig, axes = plt.subplots(1, 3, figsize=(13, 4.6), gridspec_kw={"wspace": 0.12})
@@ -137,7 +137,7 @@ for ax, s, lab in zip(axes, ["rot_deep", "rot_mod", "rot_weak"],
     draw(ax, s, lw=1.3, labels=(s == "rot_deep"), arrow=(s == "rot_deep"))
     ax.set_title(f"{lab}  ({N[s]:,})", loc="left", fontsize=9.5, fontweight="semibold")
 legend(axes[0])
-save(fig, "hb_composite_depth.png")
+save(fig, "rot_composite_depth.png")
 
 # ------------------------------------------- triple points, land and ocean
 fig, axes = plt.subplots(1, 3, figsize=(13, 4.6), gridspec_kw={"wspace": 0.12})
@@ -146,4 +146,69 @@ for ax, s, lab in zip(axes, ["triple", "rot_land", "rot_ocean"],
     draw(ax, s, lw=1.3, labels=(s == "triple"), arrow=(s == "triple"))
     ax.set_title(f"{lab}  ({N[s]:,})", loc="left", fontsize=9.5, fontweight="semibold")
 legend(axes[0])
-save(fig, "hb_composite_triple.png")
+save(fig, "rot_composite_triple.png")
+
+
+# ------------------------------------------------------ lifecycle stages
+if "r_occl" in N:
+    print("\nlifecycle strata (share of disc claimed)")
+    print(f"{'stratum':<13s}{'lows':>9s}" + "".join(f"{NAME[f]:>12s}" for f in FRONTS))
+    for s in ["n_mov", "rot", "n_open", "r_open", "n_occl", "r_occl", "n_occl_land", "r_occl_land"]:
+        print(f"{s:<13s}{N[s]:9,}" + "".join(f"{100 * claimed(s, f):11.1f}%" for f in FRONTS))
+
+    TH = np.degrees(np.arctan2(YY, XX)) % 360
+    print("\nwhere the occlusion sits around occluded lows, 100-600 km "
+          "(peak/mean over eight 45-degree sectors; 1.0 = no preferred side)")
+    for s in ["n_occl", "r_occl", "n_occl_land", "r_occl_land"]:
+        a = raw(s, "OCFNT")
+        ring = (RAD >= 100) & (RAD < 600)
+        sect = np.array([a[ring & (TH >= k) & (TH < k + 45)].mean() for k in range(0, 360, 45)])
+        k = int(np.argmax(sect))
+        frame = "compass, 0 = east, counter-clockwise" if s.startswith("n") else "0 = direction of travel, counter-clockwise"
+        print(f"  {s:<13s} peak/mean {sect.max() / sect.mean():.2f}   favoured sector {k * 45}-{k * 45 + 45} deg ({frame})")
+
+    fig, axes = plt.subplots(2, 2, figsize=(10.6, 10.4), gridspec_kw={"wspace": 0.1, "hspace": 0.16})
+    for ax, s, lab in [(axes[0, 0], "n_open", "Open waves, grid north up"),
+                       (axes[0, 1], "r_open", "Open waves, rotated to travel"),
+                       (axes[1, 0], "n_occl", "Occluded lows, grid north up"),
+                       (axes[1, 1], "r_occl", "Occluded lows, rotated to travel")]:
+        draw(ax, s, lw=1.4, labels=(s == "n_open"), arrow=s.startswith("r"))
+        ax.set_title(f"{lab}  ({N[s]:,})", loc="left", fontsize=9.5, fontweight="semibold")
+    legend(axes[0, 0])
+    save(fig, "rot_composite_stages.png")
+
+
+# ------------------------------------------ handbook: north-up, by stage
+def note(ax, xy, text, col):
+    ax.text(*xy, text, color=col, fontsize=8.5, fontweight="semibold", ha="center", va="center",
+            zorder=12, bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=RULE, lw=0.7))
+
+
+if "n_triple" in N:
+    fig, axes = plt.subplots(1, 2, figsize=(12.2, 6.1), gridspec_kw={"wspace": 0.1})
+    draw(axes[0], "n_open", arrow=False)
+    note(axes[0], (-430, -470), "cold front", C["COLD"])
+    note(axes[0], (470, -220), "warm front", C["WARM"])
+    note(axes[0], (-20, 830), "occlusions of older\ncyclones to the north", C["OCFNT"])
+    axes[0].set_title(f"Open waves  ({N['n_open']:,} lows)", loc="left", fontsize=10, fontweight="semibold")
+    draw(axes[1], "n_occl", labels=False, arrow=False)
+    note(axes[1], (300, -300), "occlusion", C["OCFNT"])
+    note(axes[1], (-330, -640), "cold front", C["COLD"])
+    note(axes[1], (690, -560), "warm front", C["WARM"])
+    note(axes[1], (560, 520), "stationary", C["STNRY"])
+    axes[1].set_title(f"Occluded lows  ({N['n_occl']:,} lows)", loc="left", fontsize=10, fontweight="semibold")
+    for ax in axes:
+        ax.set_xlabel("km east of the low", fontsize=8, color=MUTED)
+    axes[0].set_ylabel("km north of the low", fontsize=8, color=MUTED)
+    save(fig, "hb_composite.png")
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.2, 6.1), gridspec_kw={"wspace": 0.1})
+    draw(axes[0], "n_occl", arrow=False)
+    axes[0].set_title(f"Occluded parent lows  ({N['n_occl']:,})", loc="left", fontsize=10, fontweight="semibold")
+    draw(axes[1], "n_triple", labels=False, arrow=False)
+    axes[1].set_title(f"Triple-point lows  ({N['n_triple']:,})", loc="left", fontsize=10, fontweight="semibold")
+    legend(axes[0])
+    for ax in axes:
+        ax.set_xlabel("km east of the low", fontsize=8, color=MUTED)
+    axes[0].set_ylabel("km north of the low", fontsize=8, color=MUTED)
+    save(fig, "hb_composite_triple.png")

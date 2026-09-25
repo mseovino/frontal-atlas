@@ -10,7 +10,15 @@
 2. The full storm tracks are included. Synoptic hours only, where the chart
    covers the whole hemisphere, so the Gulf of Alaska and Irminger Sea lows
    can come in without running off the edge of an intermediate map.
-3. Each case is rotated so the low's direction of travel points east (+x).
+3. Lows are split by lifecycle stage from the fronts attached to them (an end
+   within ATTACH_KM): open waves have a cold and a warm front and no
+   occlusion; occluded lows have an occlusion. Most lows have neither. The
+   stage split matters more than anything else here: averaged together the
+   stages hide each other, and the occlusion nearly vanishes.
+4. Each case can also be rotated so the low's direction of travel points east (+x).
+   Split by stage, rotation does not sharpen the composite and it blurs the
+   occlusion, whose orientation follows geography more than motion, so the
+   north-up (n_) strata are the ones to use; rotated ones are kept for comparison.
    Heading comes from the low's own track, 6 hours either side; lows that
    moved less than MIN_MOVE_KM in that time have no meaningful heading and are
    left out of the rotated composites. "North" in the unrotated version is
@@ -63,7 +71,10 @@ T1, T2 = lows.pressure_hpa.quantile([1 / 3, 2 / 3])
 print(f"{len(lows):,} lows; {lows.moving.mean():.0%} have a heading; "
       f"median speed {np.nanmedian(lows.speed[lows.moving]):.0f} km/h; terciles {T1:.0f} / {T2:.0f} hPa")
 
-STRATA = ["north", "rot", "rot_deep", "rot_mod", "rot_weak", "triple", "rot_land", "rot_ocean"]
+STRATA = ["north", "rot", "rot_deep", "rot_mod", "rot_weak", "triple", "rot_land", "rot_ocean",
+          # lifecycle stage: north-up (n_) and rotated (r_) for the same moving lows
+          "n_mov", "n_open", "r_open", "n_occl", "r_occl", "n_occl_land", "r_occl_land", "n_triple"]
+ATTACH_KM = 250.0   # a front "belongs" to a low if one of its ends lies this close
 hist = {s: {f: np.zeros((NB, NB)) for f in FRONTS} for s in STRATA}
 n_low = {s: 0 for s in STRATA}
 dset = pads.dataset(POINTS, format="parquet", partitioning="hive")
@@ -131,6 +142,20 @@ for year in YEARS:
         is_triple[i] = bool(np.any((dT <= TRIPLE_KM) & (dT < dS)))
     ly = ly.assign(triple=is_triple)
 
+    # ---- lifecycle stage from the fronts attached to each low
+    ep = {}
+    for ft in ("COLD", "WARM", "OCFNT"):
+        e = E[ft]
+        ep[ft] = {t: np.column_stack([np.r_[g_.x0, g_.x1], np.r_[g_.y0, g_.y1]]) for t, g_ in e.groupby("t")}
+    dmin = {ft: np.full(len(ly), np.inf) for ft in ep}
+    for i in range(len(ly)):
+        for ft in ep:
+            arr = ep[ft].get(lt[i])
+            if arr is not None:
+                dmin[ft][i] = np.hypot(arr[:, 0] - lx[i], arr[:, 1] - lyy[i]).min() / 1000
+    occl = dmin["OCFNT"] <= ATTACH_KM
+    open_ = (dmin["COLD"] <= ATTACH_KM) & (dmin["WARM"] <= ATTACH_KM) & ~occl
+
     p = ly.pressure_hpa.to_numpy(); mv = ly.moving.to_numpy(); tri = ly.triple.to_numpy()
     ocean = (ly.lon.to_numpy() < -125) | (ly.lon.to_numpy() > -65) | (ly.lat.to_numpy() > 55)
     masks = {
@@ -138,6 +163,11 @@ for year in YEARS:
         "rot_deep": ~tri & mv & (p <= T1), "rot_mod": ~tri & mv & (p > T1) & (p <= T2),
         "rot_weak": ~tri & mv & (p > T2), "triple": tri & mv,
         "rot_land": ~tri & mv & ~ocean, "rot_ocean": ~tri & mv & ocean,
+        "n_mov": ~tri & mv,
+        "n_open": ~tri & mv & open_, "r_open": ~tri & mv & open_,
+        "n_occl": ~tri & mv & occl, "r_occl": ~tri & mv & occl,
+        "n_occl_land": ~tri & mv & occl & ~ocean, "r_occl_land": ~tri & mv & occl & ~ocean,
+        "n_triple": tri,
     }
     for s in STRATA:
         n_low[s] += int(masks[s].sum())
@@ -166,7 +196,7 @@ for year in YEARS:
                 m = masks[s][idx]
                 if not m.any():
                     continue
-                X, Y = (dx, dy) if s == "north" else (rx, ry)
+                X, Y = (dx, dy) if s.startswith("n") else (rx, ry)
                 X, Y = X[:, m], Y[:, m]
                 inr = (np.abs(X) < REACH_KM) & (np.abs(Y) < REACH_KM)
                 if inr.any():
@@ -176,7 +206,8 @@ for year in YEARS:
         for s in STRATA:
             if flat[s]:
                 hist[s][ft] += np.bincount(np.concatenate(flat[s]), minlength=NB * NB).reshape(NB, NB)
-    print(f"  {year}: {len(tp):,} triple points, {is_triple.sum():,} triple-point lows of {len(ly):,}", flush=True)
+    print(f"  {year}: {len(tp):,} triple points, {is_triple.sum():,} triple-point lows of {len(ly):,}; "
+          f"moving lows open {open_[mv & ~tri].mean():.0%}, occluded {occl[mv & ~tri].mean():.0%}", flush=True)
 
 np.savez_compressed(OUT / "composite_final.npz",
                     **{f"{s}_{f}": hist[s][f] for s in STRATA for f in FRONTS},
