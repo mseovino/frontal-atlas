@@ -205,7 +205,7 @@ page = f"""<title>What to Expect This Month</title>
   <header class="masthead" style="padding-block: 2.6rem 1.6rem">
     <div class="docline"><span>WPC Surface Analysis</span><span>Training reference</span><span>Companion to <a href="{REF}">What the Surface Analysis Shows</a></span></div>
     <h1>What to Expect This Month</h1>
-    <p class="standfirst">Pick a month to see where each boundary is usually drawn, where lows and highs sit, and which central pressures are ordinary or rare for that season. Use it during practice shifts: when your map puts something where these maps are pale, look at the evidence again.</p>
+    <p class="standfirst">Pick a month to see where each boundary is usually drawn, where lows and highs sit, and which central pressures are ordinary or rare for that season. It may be handy during practice shifts as background on what is usual for the time of year; a feature where these maps are pale is not wrong, but it can be a prompt to look at the evidence again.</p>
   </header>
 
   <main>
@@ -221,7 +221,7 @@ page = f"""<title>What to Expect This Month</title>
 
     <section class="topic" style="margin-top:1.2rem">
       <h3>Central pressure, <span id="sname">December-February</span></h3>
-      <p>Only 1% of lows analysed in a region were deeper than the left map shows, and only 1% of highs were stronger than the right. A value past these is not wrong, but it is rare enough to check the label before the map goes out (SOP 8.3).</p>
+      <p>Only 1% of lows analysed in a region were deeper than the left map shows, and only 1% of highs were stronger than the right. A value past these is not wrong, since deep lows and strong highs do happen, but it is rare enough that a quick check of the label can be worthwhile (SOP 8.3).</p>
       <figure>
         <div class="frame"><img id="pimg" alt="Two maps of the seasonal 1st-percentile low and 99th-percentile high central pressure."></div>
       </figure>
