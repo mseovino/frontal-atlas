@@ -314,6 +314,46 @@ ax.legend(fontsize=8, loc="lower left", title="median position", title_fontsize=
           framealpha=0.96, edgecolor=RULE)
 save(fig, "hb_dryline_map.png")
 
+# How often a dryline is on the chart: share of synoptic analyses with one, by
+# month and (April-June) by year.
+import pyarrow.dataset as pads
+from common import POINTS
+_t = pads.dataset(POINTS, format="parquet", partitioning="hive").to_table(
+    columns=["valid_time", "ftype"]).to_pandas()
+_t["vt"] = pd.to_datetime(_t.valid_time, utc=True)
+_t = _t[_t.vt.dt.hour.isin([0, 6, 12, 18])]
+an = _t.drop_duplicates("vt")[["vt"]].copy()
+an["dl"] = an.vt.isin(set(_t.loc[_t.ftype == "DRYLN", "vt"]))
+an["m"], an["y"] = an.vt.dt.month, an.vt.dt.year
+by_m = an.groupby("m").dl.mean() * 100
+by_y = an[an.m.isin([4, 5, 6]) & (an.y >= 2007)].groupby("y").dl.mean() * 100
+print("dryline share by month:", by_m.round(1).to_dict())
+print("April-June share by year:", by_y.round(0).to_dict())
+fig, axes = plt.subplots(1, 2, figsize=(11, 3.6), sharey=True,
+                         gridspec_kw={"wspace": 0.06, "width_ratios": [1, 1.25]})
+ax = axes[0]
+ax.bar(by_m.index, by_m.values, width=0.72, color=C["DRYLN"], zorder=2)
+for mth in (5, 10):
+    ax.text(mth, by_m[mth] + 1.2, f"{by_m[mth]:.0f}%", ha="center", va="bottom", fontsize=8, color=INK)
+ax.set_xticks(range(1, 13)); ax.set_xticklabels([m[0] for m in MONTHS])
+ptitle(ax, "By month, all synoptic analyses")
+ax = axes[1]
+ax.plot(by_y.index, by_y.values, color=C["DRYLN"], lw=2, marker="o", ms=4, zorder=3)
+for yr in (by_y.idxmax(), by_y.index.max()):
+    ax.text(yr, by_y[yr] + 2.0, f"{by_y[yr]:.0f}%", ha="center", va="bottom", fontsize=8, color=INK)
+y0 = by_y.index.min()
+ax.text(y0 + 0.25, by_y[y0] - 1.5, f"{by_y[y0]:.0f}%", ha="left", va="top", fontsize=8, color=INK)
+ax.set_xticks(range(2008, 2023, 2))
+ptitle(ax, "April-June, by year")
+axes[0].yaxis.set_major_formatter(FuncFormatter(lambda v, p: f"{v:.0f}%"))
+axes[0].set_ylim(0, 62)
+axes[0].set_ylabel("analyses with a dryline", fontsize=8, color=MUTED)
+for ax in axes:
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", color="#E6EAEE", lw=0.7); ax.set_axisbelow(True)
+    ax.tick_params(labelsize=8)
+save(fig, "hb_dryline_frequency.png")
+
 # ========================================================== 11. squall lines
 ext = box_extent(-106, -68, 25, 49, cell_km=100.0, pad_km=100)
 fig = plt.figure(figsize=(11.5, 5.4))
